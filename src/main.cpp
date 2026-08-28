@@ -22,7 +22,7 @@
 #include <esp_system.h>
 
 // ----------------------------------------------------------------- config
-static const char *FW_VERSION = "1.0.0";
+static const char *FW_VERSION = "1.1.0";
 // ===================== PER-UNIT IDENTITY =====================
 // Define these in secrets.h (gitignored) to build a second bridge. Defaults below
 // are placeholders so the project builds out of the box.
@@ -72,6 +72,23 @@ static uint8_t  hidDesc[2048];
 static bool     hidDescWanted = false;   // TinyUSB skipped it (>256B enum buf)
 static bool     hidDescInFlight = false;
 static bool     hidDescDirty = false;
+
+struct UpsState {
+  bool valid = false;
+  // status flags
+  bool charging=false, discharging=false, acPresent=false, batteryPresent=false;
+  bool belowCapLimit=false, shutdownImminent=false, timeLimitExpired=false;
+  bool commLost=false, needReplacement=false, overload=false, voltNotRegulated=false;
+  int  capacity=-1;        // %
+  long runtime=-1;         // seconds
+  int  load=-1;            // %
+  int  test=-1;
+  long vin=-1;             // raw
+  long vbatt=-1;           // raw
+  int  alarm=-1;
+} ups;
+
+static uint32_t pollTimeouts = 0;
 
 static uint32_t lastDiag = 0, lastMqttTry = 0;
 static uint32_t bootMs = 0;
@@ -285,6 +302,8 @@ static void publishDiag() {
   d["usb_attached"] = usbAttached ? "true" : "false";
   d["hid_mounted"]  = hidMounted ? "true" : "false";
   d["hid_desc_len"] = hidDescLen;
+  d["poll_timeouts"] = pollTimeouts;
+  d["ups_valid"]    = ups.valid ? "true" : "false";
 
   char idbuf[16] = "none";
   if (usbAttached) snprintf(idbuf, sizeof(idbuf), "%04x:%04x", usbVid, usbPid);
@@ -465,22 +484,9 @@ static const uint8_t POLL_N = sizeof(POLL) / sizeof(POLL[0]);
 static uint8_t  pollIdx = 0;
 static bool     pollInFlight = false;
 static uint32_t lastPoll = 0;
+static uint32_t pollStart = 0;     // for the in-flight watchdog
 static uint8_t  pollBuf[16];
 
-struct UpsState {
-  bool valid = false;
-  // status flags
-  bool charging=false, discharging=false, acPresent=false, batteryPresent=false;
-  bool belowCapLimit=false, shutdownImminent=false, timeLimitExpired=false;
-  bool commLost=false, needReplacement=false, overload=false, voltNotRegulated=false;
-  int  capacity=-1;        // %
-  long runtime=-1;         // seconds
-  int  load=-1;            // %
-  int  test=-1;
-  long vin=-1;             // raw
-  long vbatt=-1;           // raw
-  int  alarm=-1;
-} ups;
 
 static const char *testStr(int t) {
   switch (t) {
@@ -553,11 +559,21 @@ static void publishUps() {
 }
 
 static void pollTick() {
+  // A GET_REPORT whose completion callback never arrives (device re-enumerated,
+  // transfer dropped) would otherwise wedge polling permanently.
+  if (pollInFlight && millis() - pollStart > 2000) {
+    pollInFlight = false;
+    pollTimeouts++;
+    pollIdx = (pollIdx + 1) % POLL_N;
+    Serial.printf("[poll] report %u timed out (%lu total)\n",
+                  POLL[pollIdx].id, (unsigned long)pollTimeouts);
+  }
   if (!hidMounted || pollInFlight) return;
   if (millis() - lastPoll < 1000) return;      // ~1 report/s -> full sweep ~7s
   lastPoll = millis();
   const PollItem &it = POLL[pollIdx];
   pollInFlight = true;
+  pollStart = millis();
   if (!tuh_hid_get_report(hidDaddr, hidIdx, it.id, HID_REPORT_TYPE_FEATURE,
                           pollBuf, (uint16_t)(it.len + 1))) {
     pollInFlight = false;
