@@ -21,12 +21,13 @@ pcb_l        = 52.0;
 pcb_w        = 23.0;
 pcb_t        = 1.6;
 
-// >>> MEASURE THESE TWO ON THE ACTUAL STACK <<<
+// Measured on a real Feather + USB Host FeatherWing stack with plain male/
+// female headers. Re-measure if you use stacking headers, which are taller.
 stack_h      = 10.8;   // MEASURED: 14.0 overall (Feather PCB bottom -> wing PCB top)
                        //           minus two 1.6 mm PCBs = 10.8
-above_wing_h = 7.4;    // PROVISIONAL: wing is spec'd 8.8 mm overall, less 1.6 mm
-                       //              PCB = 7.2 above it, +0.2 margin. CONFIRM by
-                       //              measuring wing PCB top -> top of the USB-A shell.
+above_wing_h = 7.0;    // MEASURED: 21.0 (Feather PCB bottom -> USB-A top)
+                       //           minus 14.0 (to wing PCB top) = 7.0
+headroom     = 1.0;    // air above the USB-A shell so the lid never presses on it
 
 under_h      = 4.5;    // clearance below the Feather for solder tails / LiPo lead
 
@@ -52,7 +53,7 @@ $fn = 48;
 // ---------- DERIVED ----------------------------------------------------------
 cav_l     = pcb_l + 2*gap;
 cav_w     = pcb_w + 2*gap;
-cav_h     = under_h + pcb_t + stack_h + pcb_t + above_wing_h;
+cav_h     = under_h + pcb_t + stack_h + pcb_t + above_wing_h + headroom;
 out_l     = cav_l + 2*wall;
 out_w     = cav_w + 2*wall;
 feather_z = under_h;                       // PCB underside above inner floor

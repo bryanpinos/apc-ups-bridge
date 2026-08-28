@@ -27,17 +27,25 @@ want to add cutouts.
 filament. It proves the cavity width and length and the corner posts before you
 commit to the full part.
 
-## Measure these two before printing the real thing
+## Dimensions
 
-Everything else is derived from the Feather form factor, but these depend on
-which headers you used:
+Measured on a real stack using plain male/female headers:
 
-| Parameter | Meaning |
+| Measurement | Value |
 |---|---|
-| `stack_h` | Feather PCB top surface to wing PCB bottom surface |
-| `above_wing_h` | Wing PCB top to the highest point (the USB-A shell) |
+| Feather PCB bottom to wing PCB top | **14.0 mm** |
+| Feather PCB bottom to top of USB-A shell | **21.0 mm** |
 
-Defaults are 12.0 mm and 10.0 mm. Adjust and re-render.
+which give `stack_h = 10.8` (14.0 less two 1.6 mm PCBs) and `above_wing_h = 7.0`
+(21.0 less 14.0). Plus 4.5 mm of clearance under the Feather for solder tails and
+the LiPo lead, and 1.0 mm of headroom so the lid never presses on the USB-A shell:
+
+```
+cavity 26.5 mm tall   base 14.0 + lid 16.5   footprint 57.2 x 28.2 mm
+```
+
+**Re-measure if you use stacking headers** — they are taller than plain ones and
+`stack_h` will grow.
 
 ## Suggested print settings
 
