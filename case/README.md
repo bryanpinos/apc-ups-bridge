@@ -23,9 +23,19 @@ want to add cutouts.
 
 ## Print the fit test first
 
-`ups-bridge-fittest.stl` is a 6 mm slice of the base — a few minutes of
-filament. It proves the cavity width and length and the corner posts before you
-commit to the full part.
+`ups-bridge-fittest.stl` is a ~10 mm slice of the base — a few minutes of
+filament. It proves the cavity width and the corner posts before you commit to
+the full part.
+
+It looks like two side rails with a small 90-degree tab at each end: those tabs
+are the four corner posts the Feather rests on, and the board drops *between*
+the rails and sits *on* the posts.
+
+**The slice must be taller than the posts.** `fit_h` is derived as
+`floor_t + under_h + pcb_t + 2`, which leaves 2 mm of wall standing above the
+seated board. An earlier 6 mm version sliced the posts off level with the wall
+tops, so a board laid in rested on top of everything and the width clearance
+could not be tested at all.
 
 ## Dimensions
 

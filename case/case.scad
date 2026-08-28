@@ -149,12 +149,16 @@ module top_vents() {
 
 
 // ---------- FIT TEST ---------------------------------------------------------
-// A 6 mm slice of the base: proves cavity size, corner posts and the USB-C
-// cutout height in a few minutes of printing.
+// Must be TALLER than the corner posts (floor_t + under_h = 6.5 mm), otherwise
+// the posts get sliced level with the wall tops and a board laid in rests on top
+// of everything -- which tests nothing. fit_h leaves real wall above the board so
+// the width clearance is actually checkable.
+fit_h = floor_t + under_h + pcb_t + 2.0;
+
 module fittest() {
   intersection() {
     base();
-    translate([-(out_l+10)/2, -(out_w+10)/2, 0]) cube([out_l+10, out_w+10, 6]);
+    translate([-(out_l+10)/2, -(out_w+10)/2, 0]) cube([out_l+10, out_w+10, fit_h]);
   }
 }
 
