@@ -22,7 +22,7 @@
 #include <esp_system.h>
 
 // ----------------------------------------------------------------- config
-static const char *FW_VERSION = "1.4.0";
+static const char *FW_VERSION = "1.5.0";
 // ===================== PER-UNIT IDENTITY =====================
 // Define these in secrets.h (gitignored) to build a second bridge. Defaults below
 // are placeholders so the project builds out of the box.
@@ -89,6 +89,8 @@ struct UpsState {
 } ups;
 
 static uint32_t pollTimeouts = 0;
+// loop() section timing -- worst case since the last diag publish
+static uint32_t tmUsb = 0, tmOta = 0, tmMqtt = 0, tmPoll = 0, tmLoop = 0;
 static uint8_t  setBuf[8];
 static bool     rawDump = false;
 static bool upsTest(uint8_t mode);   // defined with the poll machine
@@ -306,6 +308,9 @@ static void publishDiag() {
   d["hid_mounted"]  = hidMounted ? "true" : "false";
   d["hid_desc_len"] = hidDescLen;
   d["poll_timeouts"] = pollTimeouts;
+  d["t_loop_ms"] = tmLoop;  d["t_usb_ms"] = tmUsb;  d["t_ota_ms"] = tmOta;
+  d["t_mqtt_ms"] = tmMqtt;  d["t_poll_ms"] = tmPoll;
+  tmLoop = tmUsb = tmOta = tmMqtt = tmPoll = 0;
   d["ups_valid"]    = ups.valid ? "true" : "false";
 
   char idbuf[16] = "none";
@@ -669,6 +674,8 @@ void setup() {
   // --- MQTT first, so later stages are observable even if they hang -------
   mqtt.setServer(MQTT_HOST, MQTT_PORT);
   mqtt.setBufferSize(MQTT_BUFFER_BYTES);
+  mqtt.setKeepAlive(60);      // broker was timing us out at the 15s default
+  mqtt.setSocketTimeout(5);   // default 15s read stall is longer than keepalive
   mqtt.setCallback(onMqtt);
   bool mq = mqttConnectBlocking(12000);
   Serial.printf("[boot] wifi=%s ip=%s mqtt=%s\n",
@@ -704,9 +711,13 @@ void setup() {
   Serial.printf("APC UPS bridge v%s ready\n", FW_VERSION);
 }
 
+#define TIME_IT(acc, call) { uint32_t _t = millis(); call; uint32_t _d = millis() - _t; if (_d > acc) acc = _d; }
+
 void loop() {
-  USBHost.task(0);   // 0 = non-blocking; default UINT32_MAX blocks forever
-  ArduinoOTA.handle();
+  uint32_t loopStart = millis();
+
+  TIME_IT(tmUsb, USBHost.task(0))   // 0 = non-blocking; default UINT32_MAX blocks forever
+  TIME_IT(tmOta, ArduinoOTA.handle())
 
   // Verbose while offline: a headless box must explain itself over serial.
   static uint32_t lastWifiLog = 0, lastRetry = 0;
@@ -729,16 +740,19 @@ void loop() {
   }
 
   if (WiFi.status() == WL_CONNECTED) {
-    if (!mqtt.connected()) mqttConnect();
-    else                   mqtt.loop();
+    if (!mqtt.connected()) TIME_IT(tmMqtt, mqttConnect())
+    else                   TIME_IT(tmMqtt, mqtt.loop())
   }
 
   hidDescFetchTick();
-  pollTick();
+  TIME_IT(tmPoll, pollTick())
   if (hidDescDirty && mqtt.connected()) publishDescriptor();
 
   if (millis() - lastDiag >= DIAG_INTERVAL_MS) {
     lastDiag = millis();
     if (mqtt.connected()) publishDiag();
   }
+
+  uint32_t d = millis() - loopStart;
+  if (d > tmLoop) tmLoop = d;
 }

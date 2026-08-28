@@ -22,8 +22,11 @@ pcb_w        = 23.0;
 pcb_t        = 1.6;
 
 // >>> MEASURE THESE TWO ON THE ACTUAL STACK <<<
-stack_h      = 12.0;   // Feather PCB top surface -> wing PCB bottom surface
-above_wing_h = 10.0;   // wing PCB top -> highest point (the USB-A shell)
+stack_h      = 10.8;   // MEASURED: 14.0 overall (Feather PCB bottom -> wing PCB top)
+                       //           minus two 1.6 mm PCBs = 10.8
+above_wing_h = 7.4;    // PROVISIONAL: wing is spec'd 8.8 mm overall, less 1.6 mm
+                       //              PCB = 7.2 above it, +0.2 margin. CONFIRM by
+                       //              measuring wing PCB top -> top of the USB-A shell.
 
 under_h      = 4.5;    // clearance below the Feather for solder tails / LiPo lead
 
