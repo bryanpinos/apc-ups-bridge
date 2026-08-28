@@ -173,6 +173,7 @@ release that requires a newer core than your stable PlatformIO. This project pin
 
 ```
 platformio.ini          build envs: feather (USB), ota (network), mintest (bisect)
+case/                   parametric OpenSCAD enclosure + STLs
 src/main.cpp            firmware
 src/secrets.h.example   template for the gitignored secrets.h
 tools/parse_hid.py      HID report descriptor parser -> field map
@@ -181,6 +182,13 @@ tools/br1500ms2.hex     reference descriptor from a BR1500MS2
 
 The `mintest` env builds a bare sketch with no libraries — useful for bisecting
 whether a problem is your code or the board.
+
+## Enclosure
+
+A parametric OpenSCAD case for the stacked Feather + wing lives in
+[`case/`](case/), with ready-to-print STLs. Both short ends are open by design —
+the two connectors sit at opposite ends and different heights, so no horizontal
+parting line works for both. Print `ups-bridge-fittest.stl` first.
 
 ## License
 
