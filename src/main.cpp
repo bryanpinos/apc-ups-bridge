@@ -22,7 +22,7 @@
 #include <esp_system.h>
 
 // ----------------------------------------------------------------- config
-static const char *FW_VERSION = "1.1.0";
+static const char *FW_VERSION = "1.4.0";
 // ===================== PER-UNIT IDENTITY =====================
 // Define these in secrets.h (gitignored) to build a second bridge. Defaults below
 // are placeholders so the project builds out of the box.
@@ -89,6 +89,9 @@ struct UpsState {
 } ups;
 
 static uint32_t pollTimeouts = 0;
+static uint8_t  setBuf[8];
+static bool     rawDump = false;
+static bool upsTest(uint8_t mode);   // defined with the poll machine
 
 static uint32_t lastDiag = 0, lastMqttTry = 0;
 static uint32_t bootMs = 0;
@@ -331,6 +334,10 @@ static void onMqtt(char *topic, byte *payload, unsigned int len) {
   else if (cmd == "diag")   publishDiag();
   else if (cmd == "discovery") publishDiscovery();
   else if (cmd == "reboot") { mqtt.publish(tStatus, "offline", true); delay(200); ESP.restart(); }
+  else if (cmd == "selftest")      logf("self-test quick: %s", upsTest(1) ? "submitted" : "submit FAILED");
+  else if (cmd == "selftest_deep") logf("self-test deep: %s",  upsTest(2) ? "submitted" : "submit FAILED");
+  else if (cmd == "selftest_abort")logf("self-test abort: %s", upsTest(3) ? "submitted" : "submit FAILED");
+  else if (cmd == "raw33") { rawDump = true; logf("will dump raw report 33"); }
 }
 
 static void mqttConnect() {
@@ -505,6 +512,13 @@ static const uint8_t *payload(const uint8_t *b, uint16_t len, uint8_t id, uint16
 
 static void applyReport(uint8_t id, const uint8_t *b, uint16_t len) {
   uint16_t n; const uint8_t *d = payload(b, len, id, &n);
+  if (rawDump && id == 33) {
+    char m[80]; int o = snprintf(m, sizeof(m), "raw33 len=%u:", len);
+    for (uint16_t i = 0; i < len && o < 70; i++) o += snprintf(m+o, sizeof(m)-o, " %02x", b[i]);
+    Serial.println(m);
+    if (mqtt.connected()) mqtt.publish(tLog, m);
+    rawDump = false;
+  }
   switch (id) {
     case 22: if (n >= 2) {
         uint16_t f = (uint16_t)d[0] | ((uint16_t)d[1] << 8);
@@ -556,6 +570,37 @@ static void publishUps() {
   char out[640];
   size_t n = serializeJson(d, out, sizeof(out));
   mqtt.publish(tUps, (const uint8_t *)out, n, false);
+}
+
+// Write to the Test field (report 33, usage 0x84:0x58).
+//   1 = quick test, 2 = deep test, 3 = abort
+// This transfers the UPS to its inverter for a few seconds -- anything on the
+// battery-backed outlets rides on the inverter while it runs.
+// Write the Test field (report 33 / usage 0x84:0x58): 1 quick, 2 deep, 3 abort.
+//
+// The report id MUST be prefixed to the payload. TinyUSB already puts it in
+// wValue, which is what the HID spec says, and the transfer is ACCEPTED either
+// way -- but this APC firmware silently ignores a payload-only write and does
+// nothing. Verified: payload-only never starts a test, id-prefixed always does.
+// Consistent with GET_REPORT on this device returning "21 06" (id, then value).
+static bool upsTest(uint8_t mode) {
+  if (!hidMounted) return false;
+  setBuf[0] = 33;
+  setBuf[1] = mode;
+  bool ok = tuh_hid_set_report(hidDaddr, hidIdx, 33, HID_REPORT_TYPE_FEATURE, setBuf, 2);
+  Serial.printf("[test] mode=%u submit=%s\n", mode, ok ? "ok" : "FAILED");
+  return ok;
+}
+
+extern "C" void tuh_hid_set_report_complete_cb(uint8_t daddr, uint8_t idx,
+                                               uint8_t report_id, uint8_t report_type,
+                                               uint16_t len) {
+  (void)daddr; (void)idx; (void)report_type;
+  char m[96];
+  snprintf(m, sizeof(m), "set_report complete: id=%u len=%u (%s)",
+           report_id, len, len ? "ACCEPTED" : "REJECTED/stalled");
+  Serial.println(m);
+  if (mqtt.connected()) mqtt.publish(tLog, m);
 }
 
 static void pollTick() {

@@ -88,6 +88,32 @@ Base topic is `apcups/<UNIT_ID>/`.
 | `log` | free-text log lines |
 | `cmd` | accepts `dump`, `diag`, `discovery`, `reboot` |
 
+## Running a self-test
+
+```bash
+mosquitto_pub -h broker -t 'apcups/<unit>/cmd' -m selftest        # quick
+mosquitto_pub -h broker -t 'apcups/<unit>/cmd' -m selftest_deep
+mosquitto_pub -h broker -t 'apcups/<unit>/cmd' -m selftest_abort
+```
+
+Watch `<base>/ups`: `discharging` flips true while the inverter carries the load,
+then `test` settles on `passed` / `warning` / `error` / `aborted`.
+
+**The report id must be prefixed to the SET_REPORT payload.** TinyUSB already puts
+it in `wValue`, which is what the HID spec requires, and the transfer is *accepted*
+either way — but this APC firmware silently ignores a payload-only write and does
+nothing at all. Verified both directions: payload-only never starts a test,
+id-prefixed always does. Consistent with GET_REPORT on this device returning
+`21 06` (report id, then value).
+
+**The UPS will refuse a test while the battery is recharging.** After a test it sits
+around 93 % for a while, and a further request is accepted, resets the state to
+"no test initiated", and then does nothing. That is the UPS protecting itself, not
+a bug — wait for it to reach full charge.
+
+⚠️ A self-test transfers everything on the battery-backed outlets to the inverter
+for a few seconds. If the inverter is faulty, that load drops.
+
 ## Adapting to a different UPS
 
 **The report map is model-specific — do not assume this one fits your UPS.** The
