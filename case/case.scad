@@ -14,10 +14,11 @@
 //  opened the end removed the full width of it, so the face plate had nothing
 //  left to register against, and the corner posts sat directly in its path.
 //
-//  The board goes in from above. It does not have to clear the end wall on the
-//  way down -- the connectors barely pass the PCB edge, and the cavity is 1.2 mm
-//  longer than the board, so it drops in sitting slightly back and is then slid
-//  forward until the connectors nose INTO their holes. That self-locates it.
+//  The Feather goes in from above and is SCREWED to four bosses, which fixes its
+//  position relative to the connector openings instead of leaving it to gravity.
+//  Fit the Feather and its screws first, then plug the wing on top -- the wing
+//  covers the Feather's mounting holes, and the 10.8 mm gap between the boards
+//  clears the screw heads easily.
 //    OpenSCAD -o out.stl -D 'part="base"'    case.scad
 //    OpenSCAD -o out.stl -D 'part="lid"'     case.scad
 //    OpenSCAD -o out.stl -D 'part="fittest"' case.scad   // 6 mm test slice
@@ -116,13 +117,39 @@ module rrect(l, w, h, r) {
     offset(r = r) offset(delta = -r) square([l, w], center = true);
 }
 
-// Corner posts the Feather rests on.
+// ---------- SCREW BOSSES ------------------------------------------------------
+// Four bosses aligned to the FEATHER's mounting holes (the wing stacks above and
+// is not fastened). Bosses replace the plain corner posts the board used to rest
+// on: screwing it down also pins it against the connector openings, so the plug
+// heights stay true.
+//
+// MEASURED: 3.5 mm from the board edge to the FAR side of the mounting hole, the
+// same to the long and the short edge. The hole CENTRE is therefore
+// 3.5 - board_hole_d/2 in from each edge. board_hole_d is the one value not
+// measured -- 2.0 puts the centre at 2.5 mm, which is exactly the 0.1" the
+// Feather spec calls for, so the two agree. If the holes measure 2.5 mm instead,
+// change the constant and the centres shift inward 0.25 mm.
+feather_l    = 50.8;   // Feather spec, NOT the 52.0 wing footprint the cavity uses
+feather_w    = 22.86;
+hole_edge    = 3.5;    // MEASURED: board edge -> far side of the mounting hole
+board_hole_d = 2.0;    // ASSUMED -- see above
+hole_inset   = hole_edge - board_hole_d/2;
+
+boss_od      = 5.0;
+screw_pilot  = 1.7;    // M2 self-tapping into PLA. Drill out to 2.05 for a
+                       // machine screw and a nut, or 1.5 for a tighter bite.
+
+// The Feather sits hard against the connector end, so its openings line up: its
+// end edge is at the cavity end and the bosses are referenced back from there.
 module posts() {
-  p = 3.2;
-  for (x = [-1, 1], y = [-1, 1])
-    translate([x * (cav_l/2 - p/2), y * (cav_w/2 - p/2), floor_t])
-      translate([-p/2, -p/2, 0])
-        cube([p, p, under_h]);
+  for (px = [conn_end * (cav_l/2 - hole_inset),
+             conn_end * (cav_l/2 - feather_l + hole_inset)],
+       py = [-1, 1])
+    translate([px, py * (feather_w/2 - hole_inset), floor_t])
+      difference() {
+        cylinder(h = under_h, d = boss_od);
+        translate([0, 0, -0.5]) cylinder(h = under_h + 1, d = screw_pilot);
+      }
 }
 
 // ---------- CONNECTOR OPENINGS ------------------------------------------------
