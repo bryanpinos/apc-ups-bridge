@@ -123,16 +123,13 @@ module rrect(l, w, h, r) {
 // on: screwing it down also pins it against the connector openings, so the plug
 // heights stay true.
 //
-// MEASURED: 3.5 mm from the board edge to the FAR side of the mounting hole, the
-// same to the long and the short edge. The hole CENTRE is therefore
-// 3.5 - board_hole_d/2 in from each edge. board_hole_d is the one value not
-// measured -- 2.0 puts the centre at 2.5 mm, which is exactly the 0.1" the
-// Feather spec calls for, so the two agree. If the holes measure 2.5 mm instead,
-// change the constant and the centres shift inward 0.25 mm.
+// Both measured: 3.5 mm from the board edge to the FAR side of the mounting
+// hole (the same to the long and the short edge), and 2.5 mm hole diameter. The
+// hole CENTRE is therefore 3.5 - 2.5/2 = 2.25 mm in from each edge.
 feather_l    = 50.8;   // Feather spec, NOT the 52.0 wing footprint the cavity uses
 feather_w    = 22.86;
 hole_edge    = 3.5;    // MEASURED: board edge -> far side of the mounting hole
-board_hole_d = 2.0;    // ASSUMED -- see above
+board_hole_d = 2.5;    // MEASURED
 hole_inset   = hole_edge - board_hole_d/2;
 
 boss_od      = 5.0;
