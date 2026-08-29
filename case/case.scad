@@ -91,17 +91,21 @@ wall         = 2.0;
 floor_t      = 2.0;
 gap          = 0.6;    // per-side clearance around the PCB
 corner_r     = 2.5;
-// The lid locates with a SPIGOT that drops into the top of the cavity, not a
-// skirt around the outside. An outer skirt has to live in a rebate cut into the
-// base's outer wall -- the same wall the connector holes are in -- and at this
-// stack height the rebate collided with the top of the USB-A opening, putting
-// the lid seam across the port. An inner spigot shares nothing with that wall.
-// It hangs above the board rather than reaching down beside it: the cavity is
-// only 0.6 mm wider than the PCB, so there is no room alongside, but there is
-// clear air above the USB-A shell.
-spigot_h     = 2.0;    // engagement depth; USB-A top clears it by 1.0 mm
-spigot_t     = 1.2;    // ring wall
-spigot_clear = 0.3;    // per side, spigot to cavity wall
+// The lid drops OVER a rebated step on the tray rim. A short-lived inner-spigot
+// version was tried and abandoned: it was given 0.3 mm per-side CLEARANCE, which
+// aligns the lid and does nothing to hold it, so the lid simply fell off.
+// Retention here is friction on the step, which means the bore must be sized to
+// the step as PRINTED, not as modelled -- this printer runs internal dimensions
+// roughly 0.4 mm large, enough on its own to turn a press fit into a rattle.
+lip_h        = 3.0;    // rebate depth on the tray rim
+lip_t        = 1.2;    // wall thickness left at the step
+
+step_l       = 55.6;   // MEASURE the printed tray's step; nominal cav_l + 2*lip_t
+step_w       = 26.6;   // MEASURE; nominal cav_w + 2*lip_t
+skirt_fit    = 0.0;    // total added to the bore. 0 = line-to-line on the
+                       // measured step. Negative = interference.
+skirt_h      = 2.8;    // 0.2 mm shy of lip_h so the plate seats on the step top,
+                       // not on the shoulder
 vent_slots   = true;
 
 part = "base";
@@ -205,30 +209,51 @@ module base() {
     translate([0, 0, floor_t]) rrect(cav_l, cav_w, base_h, corner_r * 0.6);
     conn_holes();
     floor_vents_c();
+    // rebate at the rim: the lid's skirt drops over the step this leaves
+    translate([0, 0, base_h - lip_h])
+      difference() {
+        rrect(out_l + 2, out_w + 2, lip_h + 2, corner_r);
+        rrect(cav_l + 2*lip_t, cav_w + 2*lip_t, lip_h + 4, corner_r * 0.6);
+      }
   }
   posts();
 }
 
 // ---------- LID --------------------------------------------------------------
-// A flat plate the size of the case, plus a spigot ring underneath that drops
-// into the top of the cavity and locates it. Outside, the joint is a clean butt
-// line on the rim. No opening of any kind -- the connectors are entirely the
-// base's problem now. Print it PLATE DOWN: the other way up, the ring prints
-// first and the plate becomes a 24 mm bridge.
+// A plate with a skirt that drops OVER the step left by the tray's rim rebate --
+// i.e. the lid wraps the tray, it does not plug into it. The skirt's outer face
+// is flush with the tray wall, so the joint reads as a single line.
+//
+// The skirt would otherwise clip the top of the USB-A opening: that opening's
+// top edge is at 28.65 and the skirt's lower edge lands at 28.10, so 0.55 mm of
+// port would be covered. usba_relief() notches the skirt bottom over the port
+// width to clear it. The USB-C opening tops out at 13.10 and is nowhere near.
+//
+// Print PLATE DOWN -- the other way up, the skirt prints first and the plate
+// becomes a 26 mm bridge.
 module lid() {
   difference() {
     union() {
       rrect(out_l, out_w, lid_h, corner_r);
-      translate([0, 0, -spigot_h])
+      translate([0, 0, -skirt_h])
         difference() {
-          rrect(cav_l - 2*spigot_clear, cav_w - 2*spigot_clear, spigot_h, corner_r * 0.6);
+          rrect(out_l, out_w, skirt_h, corner_r);
           translate([0, 0, -0.5])
-            rrect(cav_l - 2*spigot_clear - 2*spigot_t,
-                  cav_w - 2*spigot_clear - 2*spigot_t, spigot_h + 1, corner_r * 0.4);
+            rrect(step_l + skirt_fit, step_w + skirt_fit, skirt_h + 1, corner_r * 0.6);
         }
     }
     top_vents();
+    usba_relief();
   }
+}
+
+// Notch in the skirt's lower edge so it cannot cover the USB-A opening.
+module usba_relief() {
+  x_in  = step_l/2 - 0.5;        // just inboard of the skirt bore
+  x_out = out_l/2 + 1.0;         // clear of the outer face
+  h     = 1.2;                   // covers the 0.55 mm overlap with margin
+  translate([conn_end * (x_in + x_out)/2, 0, -skirt_h + h/2 - 0.01])
+    cube([x_out - x_in, usba_w + 2.0, h], center = true);
 }
 
 module top_vents() {
