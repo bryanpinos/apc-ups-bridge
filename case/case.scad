@@ -25,8 +25,8 @@ pcb_t        = 1.6;
 // female headers. Re-measure if you use stacking headers, which are taller.
 stack_h      = 10.8;   // MEASURED: 14.0 overall (Feather PCB bottom -> wing PCB top)
                        //           minus two 1.6 mm PCBs = 10.8
-above_wing_h = 7.0;    // MEASURED: 21.0 (Feather PCB bottom -> USB-A top)
-                       //           minus 14.0 (to wing PCB top) = 7.0
+above_wing_h = 7.4;    // MEASURED: 21.4 (Feather PCB bottom -> USB-A top)
+                       //           minus 14.0 (to wing PCB top) = 7.4
 headroom     = 2.5;    // air above the USB-A shell. Not just lid clearance: the
                        // face plate needs material ABOVE the USB-A hole, and at
                        // 1.0 it was left with 0.7 mm and broke out of the edge.
@@ -52,14 +52,42 @@ usbc_plug_w  = 11.0;   // measured
 usbc_plug_h  = 6.6;
 usba_plug_w  = 15.1;   // measured
 usba_plug_h  = 7.7;
-plug_clear   = 0.8;    // total added, i.e. 0.4 per side
+plug_clear   = 1.2;    // total added, i.e. 0.6 per side. Deliberately loose:
+                       // the connector CENTRE heights below are derived from
+                       // caliper measurements that close to about +/-0.5 mm, and
+                       // a plug that rattles slightly still mates -- one that is
+                       // 0.4 mm proud of the hole does not.
+
+// Connector CENTRE heights, from the FEATHER PCB BOTTOM -- the same datum as the
+// 14.0 and 21.4 stack measurements. Closed out from three caliper readings:
+//   wing PCB top          = 14.0   -> USB-A shell bottom (it sits flush)
+//   USB-A top             = 21.4   -> USB-A spans 14.0..21.4, centre 17.7
+//   clear gap between the = 10.2   -> USB-C top = 14.0 - 10.2 = 3.8, and it sits
+//   two connector shells              on the Feather PCB top (1.6), so 1.6..3.8,
+//                                     centre 2.7
+// Note the USB-C body works out only 2.2 mm proud of the PCB, which means it is
+// a mid-mount part sitting in a board cutout, not a 3.2 mm top-mount one. The
+// three measurements close on each other, so trust them over the datasheet.
+usbc_c       = 2.7;
+usba_c       = 17.7;
+
+usbc_z       = under_h + usbc_c;   // converted to cavity-floor datum
+usba_z       = under_h + usba_c;
 
 usbc_w       = usbc_plug_w + plug_clear;
 usbc_h       = usbc_plug_h + plug_clear;
 usba_w       = usba_plug_w + plug_clear;
 usba_h       = usba_plug_h + plug_clear;
-usba_z       = 22.0;   // centre height: 18.5 (wing PCB top) + 3.5
+// Horizontal position of each opening, across the plate width. Both connectors
+// are centred on the board width, so both are 0.
+usbc_y       = 0.0;
 usba_y       = 0.0;
+
+// An undefined variable here does NOT fail: OpenSCAD warns, discards the whole
+// translate, and quietly cuts the hole at the plate origin. That shipped a plate
+// with the USB-C opening 3.2 mm low. Fail loudly instead.
+assert(is_num(usbc_y) && is_num(usba_y) && is_num(usbc_c) && is_num(usba_c),
+       "connector opening positions must all be numbers");
 
 face_t       = 1.2;    // per layer (flange + plug) -> 2.4 mm total, was 4.0.
                        // Plate thickness directly eats plug insertion depth.
