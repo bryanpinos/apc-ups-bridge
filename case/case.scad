@@ -44,17 +44,20 @@ under_h      = 4.5;    // clearance below the Feather for solder tails / LiPo le
 conn_end     = 1;      // +1 or -1: which end the connectors face
 
 // Openings, measured from the CAVITY FLOOR. Verify against the real boards.
-// Openings are sized for the mating PLUG, not the connector body. A plug's
-// overmold is much larger than the receptacle, and it has to clear the plate
-// before its shell can seat. Sizing to the body makes a plate you cannot plug
-// into -- which is exactly what the first print did.
-usbc_w       = 12.0;   // USB-C plug overmold, not the 9.0 receptacle
-usbc_h       = 6.5;
-usbc_z       = 7.7;    // centre height: under_h + pcb_t + half the body
-usbc_y       = 0.0;    // lateral offset from centreline (+ = toward one wall)
+// MEASURED plug overmold dimensions -- the real constraint. The receptacle is
+// irrelevant: what has to pass through is the plug, and its overmold is much
+// larger. Measure the actual cables that will live in this case; a chunky
+// charging lead can be half again the size of a slim one.
+usbc_plug_w  = 11.0;   // measured
+usbc_plug_h  = 6.6;
+usba_plug_w  = 15.1;   // measured
+usba_plug_h  = 7.7;
+plug_clear   = 0.8;    // total added, i.e. 0.4 per side
 
-usba_w       = 15.5;   // USB-A plug overmold, not the 13.2 receptacle
-usba_h       = 8.0;
+usbc_w       = usbc_plug_w + plug_clear;
+usbc_h       = usbc_plug_h + plug_clear;
+usba_w       = usba_plug_w + plug_clear;
+usba_h       = usba_plug_h + plug_clear;
 usba_z       = 22.0;   // centre height: 18.5 (wing PCB top) + 3.5
 usba_y       = 0.0;
 
@@ -121,7 +124,7 @@ module hole(y, z, w, h) {
       offset(r = 0.6) offset(delta = -0.6) square([w, h], center = true);
   translate([y, z, -0.01])
     linear_extrude(height = 1.2, scale = 1.0)
-      offset(r = 0.6) offset(delta = -0.6) square([w + 2.4, h + 2.4], center = true);
+      offset(r = 0.6) offset(delta = -0.6) square([w + 1.6, h + 1.6], center = true);
 }
 
 module face() {
