@@ -5,10 +5,19 @@
 //
 //  Two parts, both print flat with no supports.
 //
-//  DESIGN NOTE: both USB ports exit the SAME end. That end gets a central
-//  full-height slot for the connectors but KEEPS its corner pillars; the far end
-//  is a solid wall. The stack drops in from above and is then captured
-//  lengthwise -- pillars one way, solid wall the other -- with no screw needed.
+//  DESIGN NOTE: both USB ports exit the SAME end, and that end wall is SOLID,
+//  carrying one hole per connector. The base is therefore full height and the
+//  lid is only a cap.
+//
+//  This replaces an earlier three-part scheme (short base + tall lid + a separate
+//  face plate pressed into an open end). That could not work: the slot that
+//  opened the end removed the full width of it, so the face plate had nothing
+//  left to register against, and the corner posts sat directly in its path.
+//
+//  The board goes in from above. It does not have to clear the end wall on the
+//  way down -- the connectors barely pass the PCB edge, and the cavity is 1.2 mm
+//  longer than the board, so it drops in sitting slightly back and is then slid
+//  forward until the connectors nose INTO their holes. That self-locates it.
 //    OpenSCAD -o out.stl -D 'part="base"'    case.scad
 //    OpenSCAD -o out.stl -D 'part="lid"'     case.scad
 //    OpenSCAD -o out.stl -D 'part="fittest"' case.scad   // 6 mm test slice
@@ -27,35 +36,29 @@ stack_h      = 10.8;   // MEASURED: 14.0 overall (Feather PCB bottom -> wing PCB
                        //           minus two 1.6 mm PCBs = 10.8
 above_wing_h = 7.4;    // MEASURED: 21.4 (Feather PCB bottom -> USB-A top)
                        //           minus 14.0 (to wing PCB top) = 7.4
-headroom     = 2.5;    // air above the USB-A shell. Not just lid clearance: the
-                       // face plate needs material ABOVE the USB-A hole, and at
-                       // 1.0 it was left with 0.7 mm and broke out of the edge.
+headroom     = 3.0;    // air above the USB-A shell. Sets how much wall is left
+                       // above the USB-A hole, whose top edge lands at 28.65 from
+                       // the outer floor. Below ~2.3 the hole breaks out of the
+                       // top of the base entirely.
 
 under_h      = 4.5;    // clearance below the Feather for solder tails / LiPo lead
 
 // ---------- CONNECTOR END ----------------------------------------------------
-// Both USB ports exit the same end. That end is left fully open in the base and
-// lid, and closed afterwards by a separate FACE PLATE carrying one exact hole per
-// connector. This is the only way to get two clean openings: a connector can only
-// pass through an opening that is open in the direction of assembly, and no
-// horizontal parting line runs through both a ~7 mm and a ~22 mm connector.
-// The face plate also blocks the board from sliding out, so it replaces the
-// corner pillars as the retention feature.
+// Both USB ports exit the same end, through a solid 2 mm wall. The plug overmold
+// -- not the receptacle -- is what has to pass through: the connectors sit ~2 mm
+// behind the outer face, and a USB-A plug only has ~12 mm of shell against ~12 mm
+// of insertion depth, so if the overmold could not enter the hole the plug would
+// stop 2 mm short of seating. Size these to the actual cables that will live in
+// this case; a chunky charging lead can be half again the size of a slim one.
 conn_end     = 1;      // +1 or -1: which end the connectors face
 
-// Openings, measured from the CAVITY FLOOR. Verify against the real boards.
-// MEASURED plug overmold dimensions -- the real constraint. The receptacle is
-// irrelevant: what has to pass through is the plug, and its overmold is much
-// larger. Measure the actual cables that will live in this case; a chunky
-// charging lead can be half again the size of a slim one.
 usbc_plug_w  = 11.0;   // measured
 usbc_plug_h  = 6.6;
 usba_plug_w  = 15.1;   // measured
 usba_plug_h  = 7.7;
-plug_clear   = 1.2;    // total added, i.e. 0.6 per side. Deliberately loose:
-                       // the connector CENTRE heights below are derived from
-                       // caliper measurements that close to about +/-0.5 mm, and
-                       // a plug that rattles slightly still mates -- one that is
+plug_clear   = 1.2;    // total added, i.e. 0.6 per side. Deliberately loose: the
+                       // centre heights below close to about +/-0.5 mm, and a
+                       // plug that rattles slightly still mates -- one that is
                        // 0.4 mm proud of the hole does not.
 
 // Connector CENTRE heights, from the FEATHER PCB BOTTOM -- the same datum as the
@@ -71,27 +74,16 @@ plug_clear   = 1.2;    // total added, i.e. 0.6 per side. Deliberately loose:
 usbc_c       = 2.7;
 usba_c       = 17.7;
 
-usbc_z       = under_h + usbc_c;   // converted to cavity-floor datum
-usba_z       = under_h + usba_c;
-
 usbc_w       = usbc_plug_w + plug_clear;
 usbc_h       = usbc_plug_h + plug_clear;
 usba_w       = usba_plug_w + plug_clear;
 usba_h       = usba_plug_h + plug_clear;
-// Horizontal position of each opening, across the plate width. Both connectors
-// are centred on the board width, so both are 0.
-usbc_y       = 0.0;
-usba_y       = 0.0;
 
 // An undefined variable here does NOT fail: OpenSCAD warns, discards the whole
-// translate, and quietly cuts the hole at the plate origin. That shipped a plate
-// with the USB-C opening 3.2 mm low. Fail loudly instead.
-assert(is_num(usbc_y) && is_num(usba_y) && is_num(usbc_c) && is_num(usba_c),
-       "connector opening positions must all be numbers");
-
-face_t       = 1.2;    // per layer (flange + plug) -> 2.4 mm total, was 4.0.
-                       // Plate thickness directly eats plug insertion depth.
-face_fit     = 0.25;   // per-side interference into the end opening
+// transform, and draws the feature at the origin. That shipped a face plate with
+// its USB-C opening 3.2 mm low. Fail loudly instead.
+assert(is_num(usbc_c) && is_num(usba_c) && is_num(usbc_w) && is_num(usba_h),
+       "connector opening dimensions must all be numbers");
 
 // ---------- SHELL ------------------------------------------------------------
 wall         = 2.0;
@@ -113,8 +105,10 @@ out_l     = cav_l + 2*wall;
 out_w     = cav_w + 2*wall;
 feather_z = under_h;                       // PCB underside above inner floor
 wing_z    = under_h + pcb_t + stack_h;
-base_h    = floor_t + under_h + pcb_t + stack_h * 0.55;
-lid_h     = floor_t + (cav_h - (base_h - floor_t));
+// The base is now the whole box: it has to be tall enough to contain the USB-A
+// hole in its own end wall. The lid is just a cap over the top.
+base_h    = floor_t + cav_h;
+lid_h     = floor_t;
 
 // Rounded rectangular prism, centred in X/Y, sitting on z=0.
 module rrect(l, w, h, r) {
@@ -131,41 +125,30 @@ module posts() {
         cube([p, p, under_h]);
 }
 
-// Opens the connector end completely in the base and lid; the face plate closes
-// it. The far end wall stays solid.
-module conn_slot() {
-  h = cav_h + lip_h + 20;
-  translate([conn_end * (out_l/2 - wall/2), 0, floor_t + h/2])
-    cube([wall + 0.4, out_w + 4, h], center = true);
+// ---------- CONNECTOR OPENINGS ------------------------------------------------
+// Cut through the SOLID end wall of the base. Heights come from usbc_c / usba_c,
+// which are measured from the Feather PCB bottom -- so the datum chain here is
+// outer floor -> floor_t -> under_h (post height) -> the measured centre.
+//
+// Each opening is a straight bore plus a shallow relief on the OUTSIDE face, so
+// a plug overmold noses in rather than butting against a flat wall.
+module rr2(a, b, r) { offset(r = r) offset(delta = -r) square([a, b], center = true); }
+
+module conn_hole(c, w, h) {
+  z = floor_t + under_h + c;
+  // straight bore, right through the wall
+  translate([conn_end * (out_l/2 - wall/2), 0, z])
+    rotate([0, 90, 0])
+      linear_extrude(height = wall + 2, center = true) rr2(h, w, 0.6);
+  // outward relief, 1.2 mm deep, leaving 0.8 mm of full-thickness wall
+  translate([conn_end * (out_l/2 - 0.4), 0, z])
+    rotate([0, 90, 0])
+      linear_extrude(height = 1.6, center = true) rr2(h + 1.6, w + 1.6, 0.6);
 }
 
-// ---------- FACE PLATE -------------------------------------------------------
-// Presses into the open connector end after the stack is in. Built in its own
-// frame: y is height above the CAVITY FLOOR, so usbc_z / usba_z drop straight in.
-// The outer flange seats against the case end; the plug is an interference fit
-// in the cavity mouth. Print it flat, holes facing up.
-// Straight bore plus an outward chamfer, so a plug overmold can nose into the
-// opening instead of butting against a flat face.
-module hole(y, z, w, h) {
-  translate([y, z, -1])
-    linear_extrude(height = face_t * 4)
-      offset(r = 0.6) offset(delta = -0.6) square([w, h], center = true);
-  translate([y, z, -0.01])
-    linear_extrude(height = 1.2, scale = 1.0)
-      offset(r = 0.6) offset(delta = -0.6) square([w + 1.6, h + 1.6], center = true);
-}
-
-module face() {
-  difference() {
-    union() {
-      translate([0, cav_h/2, 0])
-        rrect(out_w, cav_h + 2*wall, face_t, corner_r * 0.6);
-      translate([0, cav_h/2, face_t])
-        rrect(cav_w + 2*face_fit, cav_h + 2*face_fit, face_t, corner_r * 0.4);
-    }
-    hole(usbc_y, usbc_z, usbc_w, usbc_h);
-    hole(usba_y, usba_z, usba_w, usba_h);
-  }
+module conn_holes() {
+  conn_hole(usbc_c, usbc_w, usbc_h);
+  conn_hole(usba_c, usba_w, usba_h);
 }
 
 module floor_vents() {
@@ -187,7 +170,7 @@ module base() {
   difference() {
     rrect(out_l, out_w, base_h, corner_r);
     translate([0, 0, floor_t]) rrect(cav_l, cav_w, base_h, corner_r * 0.6);
-    conn_slot();
+    conn_holes();
     floor_vents_c();
     // rebate at the rim for the lid lip
     translate([0, 0, base_h - lip_h])
@@ -200,21 +183,18 @@ module base() {
 }
 
 // ---------- LID --------------------------------------------------------------
-// A box open at the bottom, plus a thinner skirt that drops into the rebate
-// cut around the base rim, giving a stepped joint with no visible gap.
+// Just a cap: a flat plate plus a skirt that drops into the rebate cut around the
+// base rim, giving a stepped joint with no visible gap. No opening of any kind --
+// the connectors are entirely the base's problem now.
 module lid() {
   difference() {
     union() {
       rrect(out_l, out_w, lid_h, corner_r);
       translate([0, 0, -lip_h]) rrect(out_l, out_w, lip_h, corner_r);
     }
-    // hollow the body, leaving floor_t as the top plate
-    translate([0, 0, -0.01])
-      rrect(cav_l, cav_w, lid_h - floor_t + 0.01, corner_r * 0.6);
     // skirt bore, sized to clear the step left on the base rim
     translate([0, 0, -lip_h - 0.01])
       rrect(cav_l + 2*lip_t + 0.3, cav_w + 2*lip_t + 0.3, lip_h + 0.02, corner_r * 0.6);
-    conn_slot();
     top_vents();
   }
 }
@@ -244,4 +224,3 @@ module fittest() {
 if      (part == "base")    base();
 else if (part == "lid")     lid();
 else if (part == "fittest") fittest();
-else if (part == "face")    face();
