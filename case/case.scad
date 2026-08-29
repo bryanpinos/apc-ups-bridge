@@ -44,17 +44,22 @@ under_h      = 4.5;    // clearance below the Feather for solder tails / LiPo le
 conn_end     = 1;      // +1 or -1: which end the connectors face
 
 // Openings, measured from the CAVITY FLOOR. Verify against the real boards.
-usbc_w       = 9.6;    // USB-C on the Feather: body ~9.0 wide
-usbc_h       = 4.0;    //                       body ~3.2 tall
+// Openings are sized for the mating PLUG, not the connector body. A plug's
+// overmold is much larger than the receptacle, and it has to clear the plate
+// before its shell can seat. Sizing to the body makes a plate you cannot plug
+// into -- which is exactly what the first print did.
+usbc_w       = 12.0;   // USB-C plug overmold, not the 9.0 receptacle
+usbc_h       = 6.5;
 usbc_z       = 7.7;    // centre height: under_h + pcb_t + half the body
 usbc_y       = 0.0;    // lateral offset from centreline (+ = toward one wall)
 
-usba_w       = 14.0;   // USB-A on the wing: body ~13.2 wide
-usba_h       = 7.6;    //                    body ~7.0 tall
+usba_w       = 15.5;   // USB-A plug overmold, not the 13.2 receptacle
+usba_h       = 8.0;
 usba_z       = 22.0;   // centre height: 18.5 (wing PCB top) + 3.5
 usba_y       = 0.0;
 
-face_t       = 2.0;    // face plate thickness
+face_t       = 1.2;    // per layer (flange + plug) -> 2.4 mm total, was 4.0.
+                       // Plate thickness directly eats plug insertion depth.
 face_fit     = 0.25;   // per-side interference into the end opening
 
 // ---------- SHELL ------------------------------------------------------------
@@ -108,6 +113,17 @@ module conn_slot() {
 // frame: y is height above the CAVITY FLOOR, so usbc_z / usba_z drop straight in.
 // The outer flange seats against the case end; the plug is an interference fit
 // in the cavity mouth. Print it flat, holes facing up.
+// Straight bore plus an outward chamfer, so a plug overmold can nose into the
+// opening instead of butting against a flat face.
+module hole(y, z, w, h) {
+  translate([y, z, -1])
+    linear_extrude(height = face_t * 4)
+      offset(r = 0.6) offset(delta = -0.6) square([w, h], center = true);
+  translate([y, z, -0.01])
+    linear_extrude(height = 1.2, scale = 1.0)
+      offset(r = 0.6) offset(delta = -0.6) square([w + 2.4, h + 2.4], center = true);
+}
+
 module face() {
   difference() {
     union() {
@@ -116,12 +132,8 @@ module face() {
       translate([0, cav_h/2, face_t])
         rrect(cav_w + 2*face_fit, cav_h + 2*face_fit, face_t, corner_r * 0.4);
     }
-    translate([usbc_y, usbc_z, -1])
-      linear_extrude(height = face_t * 4)
-        offset(r = 0.6) offset(delta = -0.6) square([usbc_w, usbc_h], center = true);
-    translate([usba_y, usba_z, -1])
-      linear_extrude(height = face_t * 4)
-        offset(r = 0.6) offset(delta = -0.6) square([usba_w, usba_h], center = true);
+    hole(usbc_y, usbc_z, usbc_w, usbc_h);
+    hole(usba_y, usba_z, usba_w, usba_h);
   }
 }
 

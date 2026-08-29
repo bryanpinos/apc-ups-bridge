@@ -33,6 +33,21 @@ Assembly order: stack into base → lid on → face plate pressed in.
 Set `conn_end` to `+1` or `-1` to choose which end the connectors face, and
 `face_fit` for the press-fit interference (0.25 mm per side by default).
 
+### Size the openings for the PLUG, not the connector
+
+The first revision sized each hole to the receptacle body and produced a plate
+you could not plug into. Two things matter:
+
+* **The plug's overmold is far larger than the receptacle** it mates with, and it
+  has to clear the plate.
+* **Plate thickness eats insertion depth.** Every millimetre of plate is a
+  millimetre of plug shell that cannot reach the connector. The plate is now
+  2.4 mm total (was 4.0), and each opening is chamfered on the outer face so an
+  overmold can nose in rather than butting against a flat surface.
+
+`usbc_w/h` and `usba_w/h` are therefore **plug overmold dimensions**, not
+connector dimensions.
+
 ### Print the face plate first
 
 It is a two-minute print and it is the only part whose fit depends on connector
