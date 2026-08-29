@@ -12,14 +12,23 @@ $OPENSCAD -o stl/ups-bridge-fittest.stl -D 'part="fittest"' case.scad
 
 Outer footprint is about **57 x 28 mm**; assembled height depends on your stack.
 
-## Both short ends are open — deliberately
+## One solid end, one slotted end
 
-The Feather's USB-C and the wing's USB-A sit at **opposite ends and very
-different heights**, so no single horizontal parting line lets both connectors
-pass through a wall. Rather than guess at connector positions, both ends are
-left open: the board stack slides in, the connectors stand proud, and airflow
-improves. Set `closed_ends = true` if you have measured your own boards and
-want to add cutouts.
+**Both USB ports exit the same end**: the Feather's USB-C low down, the wing's
+USB-A well above it. That end gets a central full-height slot (`conn_slot_w`,
+17 mm by default) which clears both, while the material either side stays as
+corner pillars. The far end is a solid wall.
+
+The stack **drops in from above** — it does not slide in — and is then captured
+lengthwise: pillars one way, solid wall the other. That is what retains the
+board, so no screws or clips are needed.
+
+An earlier revision left both ends fully open, on the reasoning that two
+connectors at opposite ends and different heights cannot share a horizontal
+parting line. That was true but based on a wrong assumption about the layout,
+and it left the board free to slide straight out either end.
+
+Set `conn_end` to `+1` or `-1` to choose which end the connectors face.
 
 ## Print the fit test first
 
