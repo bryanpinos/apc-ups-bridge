@@ -27,17 +27,35 @@ stack_h      = 10.8;   // MEASURED: 14.0 overall (Feather PCB bottom -> wing PCB
                        //           minus two 1.6 mm PCBs = 10.8
 above_wing_h = 7.0;    // MEASURED: 21.0 (Feather PCB bottom -> USB-A top)
                        //           minus 14.0 (to wing PCB top) = 7.0
-headroom     = 1.0;    // air above the USB-A shell so the lid never presses on it
+headroom     = 2.5;    // air above the USB-A shell. Not just lid clearance: the
+                       // face plate needs material ABOVE the USB-A hole, and at
+                       // 1.0 it was left with 0.7 mm and broke out of the edge.
 
 under_h      = 4.5;    // clearance below the Feather for solder tails / LiPo lead
 
 // ---------- CONNECTOR END ----------------------------------------------------
-// Both USB ports (Feather USB-C, low; wing USB-A, high) are on the same end.
-// conn_slot_w is the central full-height opening they pass through. What is left
-// either side becomes a corner pillar, and those pillars are what stop the board
-// sliding out. Widen the slot only as far as the connectors actually need.
+// Both USB ports exit the same end. That end is left fully open in the base and
+// lid, and closed afterwards by a separate FACE PLATE carrying one exact hole per
+// connector. This is the only way to get two clean openings: a connector can only
+// pass through an opening that is open in the direction of assembly, and no
+// horizontal parting line runs through both a ~7 mm and a ~22 mm connector.
+// The face plate also blocks the board from sliding out, so it replaces the
+// corner pillars as the retention feature.
 conn_end     = 1;      // +1 or -1: which end the connectors face
-conn_slot_w  = 17.0;   // central opening width (USB-A is ~13.2 mm)
+
+// Openings, measured from the CAVITY FLOOR. Verify against the real boards.
+usbc_w       = 9.6;    // USB-C on the Feather: body ~9.0 wide
+usbc_h       = 4.0;    //                       body ~3.2 tall
+usbc_z       = 7.7;    // centre height: under_h + pcb_t + half the body
+usbc_y       = 0.0;    // lateral offset from centreline (+ = toward one wall)
+
+usba_w       = 14.0;   // USB-A on the wing: body ~13.2 wide
+usba_h       = 7.6;    //                    body ~7.0 tall
+usba_z       = 22.0;   // centre height: 18.5 (wing PCB top) + 3.5
+usba_y       = 0.0;
+
+face_t       = 2.0;    // face plate thickness
+face_fit     = 0.25;   // per-side interference into the end opening
 
 // ---------- SHELL ------------------------------------------------------------
 wall         = 2.0;
@@ -77,12 +95,34 @@ module posts() {
         cube([p, p, under_h]);
 }
 
-// Cuts the central connector slot in the connector end only. The far end wall
-// stays solid, and the material either side of the slot stays as corner pillars.
+// Opens the connector end completely in the base and lid; the face plate closes
+// it. The far end wall stays solid.
 module conn_slot() {
   h = cav_h + lip_h + 20;
   translate([conn_end * (out_l/2 - wall/2), 0, floor_t + h/2])
-    cube([wall + 0.4, conn_slot_w, h], center = true);
+    cube([wall + 0.4, out_w + 4, h], center = true);
+}
+
+// ---------- FACE PLATE -------------------------------------------------------
+// Presses into the open connector end after the stack is in. Built in its own
+// frame: y is height above the CAVITY FLOOR, so usbc_z / usba_z drop straight in.
+// The outer flange seats against the case end; the plug is an interference fit
+// in the cavity mouth. Print it flat, holes facing up.
+module face() {
+  difference() {
+    union() {
+      translate([0, cav_h/2, 0])
+        rrect(out_w, cav_h + 2*wall, face_t, corner_r * 0.6);
+      translate([0, cav_h/2, face_t])
+        rrect(cav_w + 2*face_fit, cav_h + 2*face_fit, face_t, corner_r * 0.4);
+    }
+    translate([usbc_y, usbc_z, -1])
+      linear_extrude(height = face_t * 4)
+        offset(r = 0.6) offset(delta = -0.6) square([usbc_w, usbc_h], center = true);
+    translate([usba_y, usba_z, -1])
+      linear_extrude(height = face_t * 4)
+        offset(r = 0.6) offset(delta = -0.6) square([usba_w, usba_h], center = true);
+  }
 }
 
 module floor_vents() {
@@ -161,3 +201,4 @@ module fittest() {
 if      (part == "base")    base();
 else if (part == "lid")     lid();
 else if (part == "fittest") fittest();
+else if (part == "face")    face();
