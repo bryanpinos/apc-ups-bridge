@@ -91,8 +91,17 @@ wall         = 2.0;
 floor_t      = 2.0;
 gap          = 0.6;    // per-side clearance around the PCB
 corner_r     = 2.5;
-lip_h        = 3.0;
-lip_t        = 1.2;
+// The lid locates with a SPIGOT that drops into the top of the cavity, not a
+// skirt around the outside. An outer skirt has to live in a rebate cut into the
+// base's outer wall -- the same wall the connector holes are in -- and at this
+// stack height the rebate collided with the top of the USB-A opening, putting
+// the lid seam across the port. An inner spigot shares nothing with that wall.
+// It hangs above the board rather than reaching down beside it: the cavity is
+// only 0.6 mm wider than the PCB, so there is no room alongside, but there is
+// clear air above the USB-A shell.
+spigot_h     = 2.0;    // engagement depth; USB-A top clears it by 1.0 mm
+spigot_t     = 1.2;    // ring wall
+spigot_clear = 0.3;    // per side, spigot to cavity wall
 vent_slots   = true;
 
 part = "base";
@@ -196,29 +205,28 @@ module base() {
     translate([0, 0, floor_t]) rrect(cav_l, cav_w, base_h, corner_r * 0.6);
     conn_holes();
     floor_vents_c();
-    // rebate at the rim for the lid lip
-    translate([0, 0, base_h - lip_h])
-      difference() {
-        rrect(out_l + 2, out_w + 2, lip_h + 2, corner_r);
-        rrect(cav_l + 2*lip_t, cav_w + 2*lip_t, lip_h + 4, corner_r * 0.6);
-      }
   }
   posts();
 }
 
 // ---------- LID --------------------------------------------------------------
-// Just a cap: a flat plate plus a skirt that drops into the rebate cut around the
-// base rim, giving a stepped joint with no visible gap. No opening of any kind --
-// the connectors are entirely the base's problem now.
+// A flat plate the size of the case, plus a spigot ring underneath that drops
+// into the top of the cavity and locates it. Outside, the joint is a clean butt
+// line on the rim. No opening of any kind -- the connectors are entirely the
+// base's problem now. Print it PLATE DOWN: the other way up, the ring prints
+// first and the plate becomes a 24 mm bridge.
 module lid() {
   difference() {
     union() {
       rrect(out_l, out_w, lid_h, corner_r);
-      translate([0, 0, -lip_h]) rrect(out_l, out_w, lip_h, corner_r);
+      translate([0, 0, -spigot_h])
+        difference() {
+          rrect(cav_l - 2*spigot_clear, cav_w - 2*spigot_clear, spigot_h, corner_r * 0.6);
+          translate([0, 0, -0.5])
+            rrect(cav_l - 2*spigot_clear - 2*spigot_t,
+                  cav_w - 2*spigot_clear - 2*spigot_t, spigot_h + 1, corner_r * 0.4);
+        }
     }
-    // skirt bore, sized to clear the step left on the base rim
-    translate([0, 0, -lip_h - 0.01])
-      rrect(cav_l + 2*lip_t + 0.3, cav_w + 2*lip_t + 0.3, lip_h + 0.02, corner_r * 0.6);
     top_vents();
   }
 }
