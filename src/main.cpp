@@ -12,6 +12,7 @@
 #include <WiFi.h>
 #include <ESPmDNS.h>
 #include <ArduinoOTA.h>
+#include <WebServer.h>
 #include <PubSubClient.h>
 #include <ArduinoJson.h>
 #include <Wire.h>
@@ -22,7 +23,7 @@
 #include <esp_system.h>
 
 // ----------------------------------------------------------------- config
-static const char *FW_VERSION = "1.5.0";
+static const char *FW_VERSION = "1.6.2";
 // ===================== PER-UNIT IDENTITY =====================
 // Define these in secrets.h (gitignored) to build a second bridge. Defaults below
 // are placeholders so the project builds out of the box.
@@ -58,6 +59,7 @@ bool fuelGaugeOk = false;
 
 WiFiClient   net;
 PubSubClient mqtt(net);
+static WebServer http(80);
 
 static char tBase[48], tStatus[80], tDiag[80], tDesc[80], tLog[80], tCmd[80], tStage[80], tBoot[80], tUps[80];
 
@@ -72,6 +74,13 @@ static uint8_t  hidDesc[2048];
 static bool     hidDescWanted = false;   // TinyUSB skipped it (>256B enum buf)
 static bool     hidDescInFlight = false;
 static bool     hidDescDirty = false;
+// Set from USBHost.begin()'s return value. hcd_init() reads the MAX3421E's
+// REVISION register and TU_ASSERTs it is 0x01/0x12/0x13, so a false return means
+// the chip did not answer: no wing, or a wing that is not seated. This is the
+// ONLY signal that distinguishes that from "wing fine, nothing plugged in" --
+// usb_attached and hid_mounted both describe the DOWNSTREAM device and read
+// false either way.
+static bool     wingPresent = false;
 
 struct UpsState {
   bool valid = false;
@@ -90,7 +99,7 @@ struct UpsState {
 
 static uint32_t pollTimeouts = 0;
 // loop() section timing -- worst case since the last diag publish
-static uint32_t tmUsb = 0, tmOta = 0, tmMqtt = 0, tmPoll = 0, tmLoop = 0;
+static uint32_t tmUsb = 0, tmOta = 0, tmMqtt = 0, tmPoll = 0, tmLoop = 0, tmHttp = 0;
 static uint8_t  setBuf[8];
 static bool     rawDump = false;
 static bool upsTest(uint8_t mode);   // defined with the poll machine
@@ -295,8 +304,10 @@ static void publishDiscovery() {
 }
 
 // ----------------------------------------------------------------- diagnostics
-static void publishDiag() {
-  JsonDocument d;
+// Fills every diagnostic field. Does NOT reset the timing accumulators; the
+// caller decides that, so a web poll cannot steal the worst-case numbers that
+// the 15 s MQTT diag exists to report.
+static void fillDiag(JsonDocument &d) {
   d["fw"]          = FW_VERSION;
   d["uptime_s"]    = (millis() - bootMs) / 1000;
   d["rssi"]        = WiFi.RSSI();
@@ -307,11 +318,12 @@ static void publishDiag() {
   d["usb_attached"] = usbAttached ? "true" : "false";
   d["hid_mounted"]  = hidMounted ? "true" : "false";
   d["hid_desc_len"] = hidDescLen;
+  d["wing_present"]  = wingPresent ? "true" : "false";
   d["poll_timeouts"] = pollTimeouts;
   d["t_loop_ms"] = tmLoop;  d["t_usb_ms"] = tmUsb;  d["t_ota_ms"] = tmOta;
-  d["t_mqtt_ms"] = tmMqtt;  d["t_poll_ms"] = tmPoll;
-  tmLoop = tmUsb = tmOta = tmMqtt = tmPoll = 0;
+  d["t_mqtt_ms"] = tmMqtt;  d["t_poll_ms"] = tmPoll;  d["t_http_ms"] = tmHttp;
   d["ups_valid"]    = ups.valid ? "true" : "false";
+  d["mqtt"]         = mqtt.connected() ? "true" : "false";
 
   char idbuf[16] = "none";
   if (usbAttached) snprintf(idbuf, sizeof(idbuf), "%04x:%04x", usbVid, usbPid);
@@ -325,7 +337,13 @@ static void publishDiag() {
     d["batt_pct"] = nullptr;
   }
 
-  char out[512];
+}
+
+static void publishDiag() {
+  JsonDocument d;
+  fillDiag(d);
+  tmLoop = tmUsb = tmOta = tmMqtt = tmPoll = tmHttp = 0;   // worst-case window closes here
+  char out[640];
   size_t n = serializeJson(d, out, sizeof(out));
   mqtt.publish(tDiag, (const uint8_t *)out, n, false);
 }
@@ -551,9 +569,7 @@ static void applyReport(uint8_t id, const uint8_t *b, uint16_t len) {
   }
 }
 
-static void publishUps() {
-  if (!ups.valid) return;
-  JsonDocument d;
+static void fillUps(JsonVariant d) {
   d["ac_present"]        = ups.acPresent        ? "true" : "false";
   d["battery_present"]   = ups.batteryPresent   ? "true" : "false";
   d["charging"]          = ups.charging         ? "true" : "false";
@@ -572,9 +588,151 @@ static void publishUps() {
   if (ups.vbatt    >= 0) { d["battery_v_raw"] = ups.vbatt;
                            d["battery_v"] = serialized(String(ups.vbatt / 100.0, 2)); }
   if (ups.alarm    >= 0) d["alarm_ctl"]   = ups.alarm;
+}
+
+static void publishUps() {
+  if (!ups.valid) return;
+  JsonDocument d;
+  fillUps(d);
   char out[640];
   size_t n = serializeJson(d, out, sizeof(out));
   mqtt.publish(tUps, (const uint8_t *)out, n, false);
+}
+
+// ----------------------------------------------------------------- web status
+// A status page served by the device itself. Everything is inline -- no CDN, no
+// external fonts, no frameworks. These boards sit on a LAN that may have no
+// route to the internet, and a status page that needs the internet to render is
+// useless exactly when you most want it.
+//
+// Accessibility note, and it is not decoration: colour is NEVER the only signal.
+// Every state also carries a word (OK / FAULT / ON BATTERY), and "good" is
+// emerald rather than a lime green, because red-against-green is not a
+// distinction every reader can make.
+static const char STATUS_HTML[] PROGMEM = R"RAWHTML(<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>UPS Bridge</title><style>
+:root{--bg:#f6f7f9;--card:#fff;--fg:#1a1d21;--mut:#606770;--line:#e3e6ea;
+      --ok:#10b981;--warn:#f59e0b;--bad:#ef4444;--accent:#2563eb}
+@media(prefers-color-scheme:dark){:root{--bg:#14171a;--card:#1d2125;--fg:#e8eaed;
+      --mut:#9aa0a6;--line:#2c3136}}
+*{box-sizing:border-box}
+body{margin:0;padding:16px;background:var(--bg);color:var(--fg);
+     font:15px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+.wrap{max-width:760px;margin:0 auto}
+h1{font-size:19px;margin:0 0 2px}
+.sub{color:var(--mut);font-size:13px;margin-bottom:14px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;
+      padding:14px;margin-bottom:12px}
+.banner{display:flex;align-items:center;gap:10px;font-weight:650;font-size:17px;
+        padding:14px;border-radius:10px;margin-bottom:12px;border:1px solid}
+.dot{width:11px;height:11px;border-radius:50%;flex:0 0 auto}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(118px,1fr));gap:10px}
+.m{background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:9px 11px}
+.m .k{color:var(--mut);font-size:11px;text-transform:uppercase;letter-spacing:.04em}
+.m .v{font-size:21px;font-weight:650;margin-top:3px}
+.m .v small{font-size:12px;font-weight:400;color:var(--mut)}
+.m .v.sm{font-size:14px;font-weight:600;line-height:1.3}
+h2{font-size:13px;text-transform:uppercase;letter-spacing:.05em;color:var(--mut);
+   margin:0 0 9px;font-weight:600}
+table{width:100%;border-collapse:collapse;font-size:13px}
+td{padding:5px 0;border-bottom:1px solid var(--line)}
+td:first-child{color:var(--mut)}td:last-child{text-align:right;font-variant-numeric:tabular-nums}
+tr:last-child td{border-bottom:0}
+.tag{display:inline-block;padding:2px 8px;border-radius:999px;font-size:11px;
+     font-weight:650;letter-spacing:.03em}
+.f-ok{background:color-mix(in srgb,var(--ok) 16%,transparent);color:var(--ok)}
+.f-bad{background:color-mix(in srgb,var(--bad) 16%,transparent);color:var(--bad)}
+.f-warn{background:color-mix(in srgb,var(--warn) 18%,transparent);color:var(--warn)}
+.f-neut{background:color-mix(in srgb,var(--mut) 16%,transparent);color:var(--mut)}
+.foot{color:var(--mut);font-size:12px;text-align:center;margin-top:4px}
+.foot a{color:var(--accent)}
+</style></head><body><div class="wrap">
+<h1 id="name">UPS Bridge</h1><div class="sub" id="sub">connecting...</div>
+<div class="banner" id="banner"><span class="dot"></span><span id="bantext">Loading</span></div>
+<div class="card"><h2>UPS</h2><div class="grid" id="metrics"></div></div>
+<div class="card"><h2>Status flags</h2><table id="flags"></table></div>
+<div class="card"><h2>Bridge</h2><table id="dev"></table></div>
+<div class="foot">refreshes every 5s &middot; <a href="/api">/api</a></div>
+</div><script>
+const F=[["ac_present","On mains","good"],["discharging","On battery","warn"],
+ ["charging","Charging","info"],["battery_present","Battery present","good"],
+ ["need_replacement","Battery needs replacement","fault"],["overload","Overload","fault"],
+ ["shutdown_imminent","Shutdown imminent","fault"],["below_cap_limit","Below capacity limit","fault"],
+ ["comm_lost","Comms lost","fault"],["volt_not_regulated","Voltage not regulated","fault"]];
+function tagOf(kind,on){
+ if(kind==="fault")return on?["FAULT","f-bad"]:["OK","f-ok"];
+ if(kind==="warn") return on?["YES","f-warn"]:["NO","f-ok"];
+ if(kind==="good") return on?["YES","f-ok"]:["NO","f-bad"];
+ return on?["YES","f-ok"]:["NO","f-neut"];}
+const T=(b)=>String(b)==="true";
+function dur(s){if(s==null)return"--";s=+s;const d=Math.floor(s/86400),h=Math.floor(s%86400/3600),
+ m=Math.floor(s%3600/60);if(d)return d+"d "+h+"h";if(h)return h+"h "+m+"m";
+ return m?m+"m":s+"s";}
+function met(k,v,u,sm){return '<div class="m"><div class="k">'+k+'</div><div class="v'+
+ (sm?" sm":"")+'">'+v+(u?' <small>'+u+'</small>':'')+'</div></div>';}
+function row(k,v){return "<tr><td>"+k+"</td><td>"+v+"</td></tr>";}
+async function tick(){
+ let d;try{d=await (await fetch("/api",{cache:"no-store"})).json();}
+ catch(e){document.getElementById("sub").textContent="unreachable";return;}
+ const u=d.ups||{};
+ document.getElementById("name").textContent=d.unit_name||"UPS Bridge";
+ document.getElementById("sub").textContent=
+   (d.unit_id||"")+" · "+(d.hostname||"")+" · "+(d.ip||"")+" · fw "+(d.fw||"");
+ const faults=F.filter(f=>f[2]==="fault"&&T(u[f[0]])).map(f=>f[1]);
+ const onBatt=T(u.discharging)||!T(u.ac_present);
+ const b=document.getElementById("banner"),dot=b.querySelector(".dot");
+ let col,txt;
+ if(d.ups_valid!=="true"){col="var(--mut)";txt="No UPS data";}
+ else if(faults.length){col="var(--bad)";txt="FAULT — "+faults.join(", ");}
+ else if(onBatt){col="var(--warn)";txt="ON BATTERY";}
+ else{col="var(--ok)";txt="OK — on mains";}
+ b.style.color=col;b.style.borderColor=col;
+ b.style.background="color-mix(in srgb,"+col+" 12%,transparent)";
+ dot.style.background=col;document.getElementById("bantext").textContent=txt;
+ document.getElementById("metrics").innerHTML=
+   met("Battery",u.capacity!=null?u.capacity:"--","%")+
+   met("Runtime",dur(u.runtime_s),"")+
+   met("Load",u.load_pct!=null?u.load_pct:"--","%")+
+   met("Input",u.input_v!=null?u.input_v:"--","V")+
+   met("Batt volts",u.battery_v!=null?u.battery_v:"--","V")+
+   met("Self-test",u.test||"--","",1);
+ document.getElementById("flags").innerHTML=F.map(f=>{
+   const [lbl,cls]=tagOf(f[2],T(u[f[0]]));
+   return row(f[1],'<span class="tag '+cls+'">'+lbl+"</span>");}).join("");
+ document.getElementById("dev").innerHTML=
+   row("Uptime",dur(d.uptime_s))+row("WiFi RSSI",(d.rssi!=null?d.rssi+" dBm":"--"))+
+   row("MQTT",d.mqtt==="true"?'<span class="tag f-ok">UP</span>':'<span class="tag f-bad">DOWN</span>')+
+   row("USB Host wing",d.wing_present==="true"?'<span class="tag f-ok">PRESENT</span>':'<span class="tag f-bad">NOT DETECTED</span>')+
+   row("USB device",d.usb_id||"--")+
+   row("HID mounted",d.hid_mounted==="true"?'<span class="tag f-ok">YES</span>':'<span class="tag f-bad">NO</span>')+
+   row("HID descriptor",(d.hid_desc_len||0)+" B")+
+   row("Poll timeouts",d.poll_timeouts)+
+   row("Free heap",((d.heap_free||0)/1024).toFixed(1)+" KB (min "+((d.heap_min||0)/1024).toFixed(1)+")")+
+   row("Loop worst",(d.t_loop_ms||0)+" ms")+
+   row("Backup cell",(d.batt_v!=null?d.batt_v+" V":"--"));
+}
+tick();setInterval(tick,5000);
+</script></body></html>)RAWHTML";
+
+static void handleRoot() {
+  http.sendHeader("Cache-Control", "no-store");
+  http.send_P(200, "text/html", STATUS_HTML);
+}
+
+static void handleApi() {
+  static char out[2048];
+  JsonDocument d;
+  fillDiag(d);                 // shared with the MQTT diag, and does not reset timers
+  d["unit_id"]   = DEV_ID;
+  d["unit_name"] = DEV_NAME;
+  JsonObject u = d["ups"].to<JsonObject>();
+  if (ups.valid) fillUps(u);
+  size_t n = serializeJson(d, out, sizeof(out));
+  http.sendHeader("Cache-Control", "no-store");
+  http.send(200, "application/json", out);
+  (void)n;
 }
 
 // Write to the Test field (report 33, usage 0x84:0x58).
@@ -701,10 +859,22 @@ void setup() {
   ArduinoOTA.begin();
   stage("ota_ok");
 
+  // --- HTTP status page --------------------------------------------------
+  http.on("/", handleRoot);
+  http.on("/api", handleApi);
+  http.onNotFound([]() { http.sendHeader("Location", "/"); http.send(302, "text/plain", ""); });
+  http.begin();
+  stage("http_ok");
+
   // --- USB host on the MAX3421E (roothub 1) ------------------------------
+  // NOTE: if the MAX3421E answers the revision read but is then flaky -- a
+  // half-seated wing is the way to achieve that -- hcd_init() spins forever in
+  // its oscillator-stable wait. That hang is observable: the stage topic stops
+  // at usbhost_begin_enter and never reaches usbhost_ok.
   stage("usbhost_begin_enter");
-  USBHost.begin(1);
-  stage("usbhost_ok");
+  wingPresent = USBHost.begin(1);
+  stage(wingPresent ? "usbhost_ok" : "usbhost_NO_WING");
+  if (!wingPresent) logf("MAX3421E did not respond -- USB Host wing missing or unseated");
 
   if (mq) { publishDiscovery(); publishDiag(); }
   stage("setup_done");
@@ -718,6 +888,7 @@ void loop() {
 
   TIME_IT(tmUsb, USBHost.task(0))   // 0 = non-blocking; default UINT32_MAX blocks forever
   TIME_IT(tmOta, ArduinoOTA.handle())
+  TIME_IT(tmHttp, http.handleClient())
 
   // Verbose while offline: a headless box must explain itself over serial.
   static uint32_t lastWifiLog = 0, lastRetry = 0;
