@@ -23,7 +23,7 @@
 #include <esp_system.h>
 
 // ----------------------------------------------------------------- config
-static const char *FW_VERSION = "1.6.2";
+static const char *FW_VERSION = "1.7.0";
 // ===================== PER-UNIT IDENTITY =====================
 // Define these in secrets.h (gitignored) to build a second bridge. Defaults below
 // are placeholders so the project builds out of the box.
@@ -646,12 +646,24 @@ tr:last-child td{border-bottom:0}
 .f-bad{background:color-mix(in srgb,var(--bad) 16%,transparent);color:var(--bad)}
 .f-warn{background:color-mix(in srgb,var(--warn) 18%,transparent);color:var(--warn)}
 .f-neut{background:color-mix(in srgb,var(--mut) 16%,transparent);color:var(--mut)}
+.btns{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
+button{font:inherit;font-weight:600;padding:9px 15px;border-radius:8px;cursor:pointer;
+       border:1px solid var(--line);background:var(--bg);color:var(--fg)}
+button:hover:not(:disabled){border-color:var(--accent)}
+button:disabled{opacity:.45;cursor:not-allowed}
+button.pri{background:var(--accent);border-color:var(--accent);color:#fff}
+#msg{font-size:13px;color:var(--mut);margin-top:9px;min-height:18px}
 .foot{color:var(--mut);font-size:12px;text-align:center;margin-top:4px}
 .foot a{color:var(--accent)}
 </style></head><body><div class="wrap">
 <h1 id="name">UPS Bridge</h1><div class="sub" id="sub">connecting...</div>
 <div class="banner" id="banner"><span class="dot"></span><span id="bantext">Loading</span></div>
-<div class="card"><h2>UPS</h2><div class="grid" id="metrics"></div></div>
+<div class="card"><h2>UPS</h2><div class="grid" id="metrics"></div>
+<div class="btns">
+ <button class="pri" id="bq" onclick="run('quick')">Run self-test</button>
+ <button id="bd" onclick="run('deep')">Deep test</button>
+ <button id="ba" onclick="run('abort')">Abort</button>
+</div><div id="msg"></div></div>
 <div class="card"><h2>Status flags</h2><table id="flags"></table></div>
 <div class="card"><h2>Bridge</h2><table id="dev"></table></div>
 <div class="foot">refreshes every 5s &middot; <a href="/api">/api</a></div>
@@ -691,6 +703,8 @@ async function tick(){
  b.style.color=col;b.style.borderColor=col;
  b.style.background="color-mix(in srgb,"+col+" 12%,transparent)";
  dot.style.background=col;document.getElementById("bantext").textContent=txt;
+ const noUps=d.ups_valid!=="true"||d.hid_mounted!=="true";
+ ["bq","bd","ba"].forEach(id=>document.getElementById(id).disabled=noUps);
  document.getElementById("metrics").innerHTML=
    met("Battery",u.capacity!=null?u.capacity:"--","%")+
    met("Runtime",dur(u.runtime_s),"")+
@@ -713,12 +727,45 @@ async function tick(){
    row("Loop worst",(d.t_loop_ms||0)+" ms")+
    row("Backup cell",(d.batt_v!=null?d.batt_v+" V":"--"));
 }
+const WARN={quick:"Run a self-test?\n\nThe UPS switches to its inverter for a few seconds. Anything on its battery outlets runs from the battery while it does.",
+ deep:"Run a DEEP self-test?\n\nThis runs the UPS on battery until it is substantially discharged, then recharges for hours. Everything on the battery outlets runs from the inverter throughout.",
+ abort:"Abort the self-test in progress?"};
+async function run(mode){
+ if(!confirm(WARN[mode]))return;
+ const m=document.getElementById("msg");m.textContent="submitting...";
+ try{
+  const r=await fetch("/test?mode="+mode,{method:"POST"});
+  const j=await r.json().catch(()=>({}));
+  m.textContent=r.ok?(mode==="abort"?"Abort submitted.":"Test submitted \u2014 result appears below within a minute.")
+                    :("Failed: "+(j.err||r.status));
+ }catch(e){m.textContent="Failed: "+e;}
+ setTimeout(tick,1500);
+}
 tick();setInterval(tick,5000);
 </script></body></html>)RAWHTML";
 
 static void handleRoot() {
   http.sendHeader("Cache-Control", "no-store");
   http.send_P(200, "text/html", STATUS_HTML);
+}
+
+// POST only, deliberately. A self-test transfers the UPS to its inverter for a
+// few seconds, so everything on its battery outlets rides on the inverter while
+// it runs -- that must never be reachable by a GET that a browser prefetch, a
+// crawler or a link preview could fire on its own.
+static void handleTest() {
+  const String m = http.arg("mode");
+  const uint8_t mode = (m == "quick") ? 1 : (m == "deep") ? 2 : (m == "abort") ? 3 : 0;
+  if (!mode) { http.send(400, "application/json", "{\"ok\":false,\"err\":\"bad mode\"}"); return; }
+  if (!hidMounted || !ups.valid) {
+    http.send(409, "application/json", "{\"ok\":false,\"err\":\"no UPS attached\"}");
+    return;
+  }
+  const bool ok = upsTest(mode);
+  logf("self-test %s via web: %s", m.c_str(), ok ? "submitted" : "submit FAILED");
+  char out[96];
+  snprintf(out, sizeof(out), "{\"ok\":%s,\"mode\":\"%s\"}", ok ? "true" : "false", m.c_str());
+  http.send(ok ? 200 : 502, "application/json", out);
 }
 
 static void handleApi() {
@@ -862,6 +909,7 @@ void setup() {
   // --- HTTP status page --------------------------------------------------
   http.on("/", handleRoot);
   http.on("/api", handleApi);
+  http.on("/test", HTTP_POST, handleTest);
   http.onNotFound([]() { http.sendHeader("Location", "/"); http.send(302, "text/plain", ""); });
   http.begin();
   stage("http_ok");
