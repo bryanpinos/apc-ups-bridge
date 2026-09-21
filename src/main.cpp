@@ -23,7 +23,7 @@
 #include <esp_system.h>
 
 // ----------------------------------------------------------------- config
-static const char *FW_VERSION = "1.7.1";
+static const char *FW_VERSION = "1.7.2";
 // ===================== PER-UNIT IDENTITY =====================
 // Define these in secrets.h (gitignored) to build a second bridge. Defaults below
 // are placeholders so the project builds out of the box.
@@ -103,6 +103,10 @@ struct UpsState {
 } ups;
 
 static uint32_t pollTimeouts = 0;
+static uint32_t submitFails  = 0;   // tuh_hid_get_report() refused (control EP busy)
+static uint32_t ep0Aborts    = 0;   // stuck control transfers we aborted
+static uint32_t lastApplied  = 0;   // millis() of the last report applied, 0 = never
+static uint32_t lastHeal     = 0;
 // loop() section timing -- worst case since the last diag publish
 static uint32_t tmUsb = 0, tmOta = 0, tmMqtt = 0, tmPoll = 0, tmLoop = 0, tmHttp = 0;
 static uint8_t  setBuf[8];
@@ -327,6 +331,8 @@ static void fillDiag(JsonDocument &d) {
   d["hid_desc_len"] = hidDescLen;
   d["wing_present"]  = wingPresent ? "true" : "false";
   d["poll_timeouts"] = pollTimeouts;
+  d["submit_fails"]  = submitFails;
+  d["ep0_aborts"]    = ep0Aborts;
   d["t_loop_ms"] = tmLoop;  d["t_usb_ms"] = tmUsb;  d["t_ota_ms"] = tmOta;
   d["t_mqtt_ms"] = tmMqtt;  d["t_poll_ms"] = tmPoll;  d["t_http_ms"] = tmHttp;
   d["ups_valid"]    = ups.valid ? "true" : "false";
@@ -546,6 +552,7 @@ static const uint8_t *payload(const uint8_t *b, uint16_t len, uint8_t id, uint16
 static void applyReport(uint8_t id, const uint8_t *b, uint16_t len) {
   uint16_t n; const uint8_t *d = payload(b, len, id, &n);
   upsDirty = true;
+  lastApplied = millis();
   if (rawDump && id == 33) {
     char m[80]; int o = snprintf(m, sizeof(m), "raw33 len=%u:", len);
     for (uint16_t i = 0; i < len && o < 70; i++) o += snprintf(m+o, sizeof(m)-o, " %02x", b[i]);
@@ -831,8 +838,16 @@ static void pollTick() {
     pollInFlight = false;
     pollTimeouts++;
     pollIdx = (pollIdx + 1) % POLL_N;
-    Serial.printf("[poll] report %u timed out (%lu total)\n",
-                  POLL[pollIdx].id, (unsigned long)pollTimeouts);
+    // v1.7.2: a timed-out GET_REPORT is still owned by TinyUSB. Its control
+    // endpoint stays busy, every later tuh_hid_get_report() is refused, and
+    // polling never makes progress again while usb_attached/hid_mounted read
+    // true (seen on both units, twice). Abort the stuck control transfer so the
+    // stack returns to idle; the submit-failure counter and the stale watchdog
+    // in loop() cover the case where even that does not help.
+    bool ab = tuh_edpt_abort_xfer(hidDaddr, 0);
+    if (ab) ep0Aborts++;
+    logf("[poll] report timed out (%lu total), ep0 abort %s",
+         (unsigned long)pollTimeouts, ab ? "ok" : "no-op");
   }
   if (!hidMounted || pollInFlight) return;
   if (millis() - lastPoll < 1000) return;      // ~1 report/s -> full sweep ~7s
@@ -843,6 +858,7 @@ static void pollTick() {
   if (!tuh_hid_get_report(hidDaddr, hidIdx, it.id, HID_REPORT_TYPE_FEATURE,
                           pollBuf, (uint16_t)(it.len + 1))) {
     pollInFlight = false;
+    submitFails++;
     pollIdx = (pollIdx + 1) % POLL_N;
   }
 }
@@ -990,6 +1006,29 @@ void loop() {
     publishUps();
     lastUpsPub = millis();
     upsDirty   = false;
+  }
+
+  // Stale-poll watchdog (v1.7.2). If the HID device is mounted but no report
+  // has been applied for a while, first abort whatever the control endpoint is
+  // stuck on; if that does not restore progress, restart -- a reboot has fixed
+  // every occurrence so far, and a bridge that reports diagnostics while
+  // silently blind is worse than one that reboots. Boot cause is visible on the
+  // retained `boot` topic (SW_RESTART) and in the `log` line published first.
+  if (hidMounted) {
+    uint32_t since = lastApplied ? lastApplied : bootMs;
+    uint32_t stale = millis() - since;
+    if (stale > 300000UL) {
+      logf("[heal] no report applied for %lus -- restarting", (unsigned long)(stale / 1000));
+      if (mqtt.connected()) { mqtt.loop(); delay(300); }
+      ESP.restart();
+    } else if (stale > 120000UL && millis() - lastHeal > 60000UL) {
+      lastHeal = millis();
+      bool ab = tuh_edpt_abort_xfer(hidDaddr, 0);
+      if (ab) ep0Aborts++;
+      pollInFlight = false;
+      logf("[heal] no report applied for %lus -- ep0 abort %s",
+           (unsigned long)(stale / 1000), ab ? "ok" : "no-op");
+    }
   }
 
   uint32_t d = millis() - loopStart;
