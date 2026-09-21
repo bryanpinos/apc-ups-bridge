@@ -23,7 +23,7 @@
 #include <esp_system.h>
 
 // ----------------------------------------------------------------- config
-static const char *FW_VERSION = "1.7.0";
+static const char *FW_VERSION = "1.7.1";
 // ===================== PER-UNIT IDENTITY =====================
 // Define these in secrets.h (gitignored) to build a second bridge. Defaults below
 // are placeholders so the project builds out of the box.
@@ -49,6 +49,11 @@ static const char *NET_HOST = UNIT_HOST;
 #define MAX3421_INT   9
 
 static const uint32_t DIAG_INTERVAL_MS   = 15000;
+// UPS readings are published on THIS timer, never only from the USB completion
+// callback: a single timed-out GET_REPORT used to phase-shift the poll sweep so
+// the wrap was never seen again and the ups topic went silent for good (both
+// units, 9 days, every health flag still true). See v1.7.1 notes.
+static const uint32_t UPS_PUBLISH_MS     = 10000;
 static const uint32_t MQTT_RETRY_MS      = 5000;
 static const size_t   MQTT_BUFFER_BYTES  = 8192;
 
@@ -105,6 +110,8 @@ static bool     rawDump = false;
 static bool upsTest(uint8_t mode);   // defined with the poll machine
 
 static uint32_t lastDiag = 0, lastMqttTry = 0;
+static uint32_t lastUpsPub = 0;      // 0 = never published since boot
+static bool     upsDirty   = false;  // a report was applied since the last publish
 static uint32_t bootMs = 0;
 
 // ----------------------------------------------------------------- helpers
@@ -323,6 +330,9 @@ static void fillDiag(JsonDocument &d) {
   d["t_loop_ms"] = tmLoop;  d["t_usb_ms"] = tmUsb;  d["t_ota_ms"] = tmOta;
   d["t_mqtt_ms"] = tmMqtt;  d["t_poll_ms"] = tmPoll;  d["t_http_ms"] = tmHttp;
   d["ups_valid"]    = ups.valid ? "true" : "false";
+  // Seconds since the last ups publish; -1 = never. THIS is the liveness signal --
+  // ups_valid stays true forever once the first report lands.
+  d["ups_age_s"]    = lastUpsPub ? (long)((millis() - lastUpsPub) / 1000) : -1L;
   d["mqtt"]         = mqtt.connected() ? "true" : "false";
 
   char idbuf[16] = "none";
@@ -535,6 +545,7 @@ static const uint8_t *payload(const uint8_t *b, uint16_t len, uint8_t id, uint16
 
 static void applyReport(uint8_t id, const uint8_t *b, uint16_t len) {
   uint16_t n; const uint8_t *d = payload(b, len, id, &n);
+  upsDirty = true;
   if (rawDump && id == 33) {
     char m[80]; int o = snprintf(m, sizeof(m), "raw33 len=%u:", len);
     for (uint16_t i = 0; i < len && o < 70; i++) o += snprintf(m+o, sizeof(m)-o, " %02x", b[i]);
@@ -842,9 +853,8 @@ extern "C" void tuh_hid_get_report_complete_cb(uint8_t daddr, uint8_t idx,
   (void)daddr; (void)idx; (void)report_type;
   if (len) applyReport(report_id, pollBuf, len);
   pollInFlight = false;
-  bool wrapped = (pollIdx + 1) % POLL_N == 0;
   pollIdx = (pollIdx + 1) % POLL_N;
-  if (wrapped && mqtt.connected()) publishUps();
+  // Publishing is timer-driven in loop() -- do not tie it to the sweep wrap here.
 }
 
 // ----------------------------------------------------------------- setup / loop
@@ -970,6 +980,16 @@ void loop() {
   if (millis() - lastDiag >= DIAG_INTERVAL_MS) {
     lastDiag = millis();
     if (mqtt.connected()) publishDiag();
+  }
+
+  // Timer-driven UPS publish: fires as soon as data is dirty after boot, then at
+  // most every UPS_PUBLISH_MS. Independent of where the poll sweep is, so no
+  // sequence of timeouts or submit failures can silence it.
+  if (upsDirty && ups.valid && mqtt.connected() &&
+      (lastUpsPub == 0 || millis() - lastUpsPub >= UPS_PUBLISH_MS)) {
+    publishUps();
+    lastUpsPub = millis();
+    upsDirty   = false;
   }
 
   uint32_t d = millis() - loopStart;
