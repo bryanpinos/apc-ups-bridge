@@ -23,7 +23,7 @@
 #include <esp_system.h>
 
 // ----------------------------------------------------------------- config
-static const char *FW_VERSION = "1.7.2";
+static const char *FW_VERSION = "1.7.3";
 // ===================== PER-UNIT IDENTITY =====================
 // Define these in secrets.h (gitignored) to build a second bridge. Defaults below
 // are placeholders so the project builds out of the box.
@@ -107,6 +107,18 @@ static uint32_t submitFails  = 0;   // tuh_hid_get_report() refused (control EP 
 static uint32_t ep0Aborts    = 0;   // stuck control transfers we aborted
 static uint32_t lastApplied  = 0;   // millis() of the last report applied, 0 = never
 static uint32_t lastHeal     = 0;
+// v1.7.3 USB recovery ladder. ESP.restart() does NOT reset the MAX3421E, so a
+// wedged host chip came back from a self-restart blind (usb_attached false for
+// three days until a physical power cycle). Recovery now goes through the chip
+// itself: bus reset first, then a full host deinit/init (CHIPRES), and only
+// then, much later, a restart as the last resort.
+static uint32_t busResets    = 0;
+static uint32_t hostReinits  = 0;
+static uint32_t usbLostSince = 0;   // millis() when the HID device went missing, 0 = mounted
+static uint32_t lastUsbHeal  = 0;
+static uint8_t  usbHealStep  = 0;
+static bool     everMounted  = false;
+static const uint8_t USB_RHPORT = 1;   // matches USBHost.begin(1)
 // loop() section timing -- worst case since the last diag publish
 static uint32_t tmUsb = 0, tmOta = 0, tmMqtt = 0, tmPoll = 0, tmLoop = 0, tmHttp = 0;
 static uint8_t  setBuf[8];
@@ -333,6 +345,9 @@ static void fillDiag(JsonDocument &d) {
   d["poll_timeouts"] = pollTimeouts;
   d["submit_fails"]  = submitFails;
   d["ep0_aborts"]    = ep0Aborts;
+  d["bus_resets"]    = busResets;
+  d["host_reinits"]  = hostReinits;
+  d["usb_lost_s"]    = usbLostSince ? (long)((millis() - usbLostSince) / 1000) : 0L;
   d["t_loop_ms"] = tmLoop;  d["t_usb_ms"] = tmUsb;  d["t_ota_ms"] = tmOta;
   d["t_mqtt_ms"] = tmMqtt;  d["t_poll_ms"] = tmPoll;  d["t_http_ms"] = tmHttp;
   d["ups_valid"]    = ups.valid ? "true" : "false";
@@ -412,7 +427,8 @@ void tuh_umount_cb(uint8_t daddr) {
 
 void tuh_hid_mount_cb(uint8_t daddr, uint8_t idx,
                       uint8_t const *report_desc, uint16_t desc_len) {
-  hidDaddr = daddr; hidIdx = idx; hidMounted = true;
+  hidDaddr = daddr; hidIdx = idx; hidMounted = true; everMounted = true;
+  usbLostSince = 0; usbHealStep = 0;
   if (desc_len == 0 || report_desc == NULL) {
     // TinyUSB skips descriptors larger than CFG_TUH_ENUMERATION_BUFSIZE (256).
     // APC descriptors exceed that, so fetch it ourselves into a bigger buffer.
@@ -873,6 +889,29 @@ extern "C" void tuh_hid_get_report_complete_cb(uint8_t daddr, uint8_t idx,
   // Publishing is timer-driven in loop() -- do not tie it to the sweep wrap here.
 }
 
+// ----------------------------------------------------------------- USB recovery
+static void usbBusReset() {
+  tuh_rhport_reset_bus(USB_RHPORT, true);
+  delay(30);
+  tuh_rhport_reset_bus(USB_RHPORT, false);
+  busResets++;
+}
+
+// Full host stack teardown and re-init: hcd_deinit and hcd_init both pulse
+// CHIPRES on the MAX3421E, which is the closest thing to a power cycle the
+// firmware can do. Does not recreate the interrupt task or the SPI bus, which
+// USBHost.begin() owns and which are still fine.
+static bool usbHostReinit() {
+  pollInFlight = false;
+  hidMounted = false; usbAttached = false;
+  tuh_deinit(USB_RHPORT);
+  delay(100);
+  const tusb_rhport_init_t rh = { .role = TUSB_ROLE_HOST, .speed = TUSB_SPEED_FULL };
+  bool ok = tuh_rhport_init(USB_RHPORT, &rh);
+  hostReinits++;
+  return ok;
+}
+
 // ----------------------------------------------------------------- setup / loop
 void setup() {
   Serial.begin(115200);
@@ -1008,26 +1047,50 @@ void loop() {
     upsDirty   = false;
   }
 
-  // Stale-poll watchdog (v1.7.2). If the HID device is mounted but no report
-  // has been applied for a while, first abort whatever the control endpoint is
-  // stuck on; if that does not restore progress, restart -- a reboot has fixed
-  // every occurrence so far, and a bridge that reports diagnostics while
-  // silently blind is worse than one that reboots. Boot cause is visible on the
-  // retained `boot` topic (SW_RESTART) and in the `log` line published first.
-  if (hidMounted) {
-    uint32_t since = lastApplied ? lastApplied : bootMs;
-    uint32_t stale = millis() - since;
-    if (stale > 300000UL) {
-      logf("[heal] no report applied for %lus -- restarting", (unsigned long)(stale / 1000));
-      if (mqtt.connected()) { mqtt.loop(); delay(300); }
-      ESP.restart();
-    } else if (stale > 120000UL && millis() - lastHeal > 60000UL) {
-      lastHeal = millis();
-      bool ab = tuh_edpt_abort_xfer(hidDaddr, 0);
-      if (ab) ep0Aborts++;
-      pollInFlight = false;
-      logf("[heal] no report applied for %lus -- ep0 abort %s",
-           (unsigned long)(stale / 1000), ab ? "ok" : "no-op");
+  // USB watchdogs (v1.7.3). Two failure shapes, one ladder each:
+  //  A. device mounted but no report applied  -> ep0 abort, then host reinit,
+  //     then (much later) restart.
+  //  B. device missing after we once had one   -> bus reset, then host reinit
+  //     every minute, then (much later) restart. A bridge that never had a
+  //     device keeps trying reinit but never restarts, so a deliberately
+  //     UPS-less board does not reboot-loop.
+  if (wingPresent) {
+    if (hidMounted) {
+      uint32_t since = lastApplied ? lastApplied : bootMs;
+      uint32_t stale = millis() - since;
+      if (stale > 600000UL) {
+        logf("[heal] no report applied for %lus after reinit -- restarting", (unsigned long)(stale / 1000));
+        if (mqtt.connected()) { mqtt.loop(); delay(300); }
+        ESP.restart();
+      } else if (stale > 300000UL && millis() - lastHeal > 60000UL) {
+        lastHeal = millis();
+        bool ok = usbHostReinit();
+        logf("[heal] no report applied for %lus -- host reinit %s", (unsigned long)(stale / 1000), ok ? "ok" : "FAILED");
+      } else if (stale > 120000UL && millis() - lastHeal > 60000UL) {
+        lastHeal = millis();
+        bool ab = tuh_edpt_abort_xfer(hidDaddr, 0);
+        if (ab) ep0Aborts++;
+        pollInFlight = false;
+        logf("[heal] no report applied for %lus -- ep0 abort %s", (unsigned long)(stale / 1000), ab ? "ok" : "no-op");
+      }
+    } else {
+      if (!usbLostSince) usbLostSince = millis();
+      uint32_t lost = millis() - usbLostSince;
+      if (lost > 60000UL && millis() - lastUsbHeal > 60000UL) {
+        lastUsbHeal = millis();
+        usbHealStep++;
+        if (usbHealStep == 1) {
+          usbBusReset();
+          logf("[heal] no USB device for %lus -- bus reset", (unsigned long)(lost / 1000));
+        } else if (lost > 600000UL && everMounted) {
+          logf("[heal] no USB device for %lus after %u reinits -- restarting", (unsigned long)(lost / 1000), (unsigned)hostReinits);
+          if (mqtt.connected()) { mqtt.loop(); delay(300); }
+          ESP.restart();
+        } else {
+          bool ok = usbHostReinit();
+          logf("[heal] no USB device for %lus -- host reinit %s", (unsigned long)(lost / 1000), ok ? "ok" : "FAILED");
+        }
+      }
     }
   }
 
