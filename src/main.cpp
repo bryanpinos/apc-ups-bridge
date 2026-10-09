@@ -23,7 +23,7 @@
 #include <esp_system.h>
 
 // ----------------------------------------------------------------- config
-static const char *FW_VERSION = "1.7.3";
+static const char *FW_VERSION = "1.8.0";
 // ===================== PER-UNIT IDENTITY =====================
 // Define these in secrets.h (gitignored) to build a second bridge. Defaults below
 // are placeholders so the project builds out of the box.
@@ -100,6 +100,7 @@ struct UpsState {
   long vin=-1;             // raw
   long vbatt=-1;           // raw
   int  alarm=-1;
+  int  sens=-1;             // APCSensitivity (report 53): 0 low, 1 medium, 2 high
 } ups;
 
 static uint32_t pollTimeouts = 0;
@@ -124,6 +125,7 @@ static uint32_t tmUsb = 0, tmOta = 0, tmMqtt = 0, tmPoll = 0, tmLoop = 0, tmHttp
 static uint8_t  setBuf[8];
 static bool     rawDump = false;
 static bool upsTest(uint8_t mode);   // defined with the poll machine
+static bool upsSetSens(uint8_t v);
 
 static uint32_t lastDiag = 0, lastMqttTry = 0;
 static uint32_t lastUpsPub = 0;      // 0 = never published since boot
@@ -310,6 +312,22 @@ static void haUps() {
     char out[768]; size_t n = serializeJson(d, out, sizeof(out));
     mqtt.publish(topic, (const uint8_t*)out, n, true);
   }
+  {
+    char topic[160];
+    snprintf(topic, sizeof(topic), "homeassistant/select/%s_sensitivity/config", DEV_ID);
+    JsonDocument d;
+    d["name"]="UPS input sensitivity"; d["uniq_id"]=String(DEV_ID)+"_sensitivity";
+    d["stat_t"]=tUps; d["val_tpl"]="{{ value_json.sensitivity | default('unknown') }}";
+    d["cmd_t"]=tCmd; d["cmd_tpl"]="sens_{{ value }}";
+    d["options"][0]="low"; d["options"][1]="medium"; d["options"][2]="high";
+    d["ent_cat"]="config"; d["icon"]="mdi:sine-wave";
+    d["avty_t"]=tStatus; d["pl_avail"]="online"; d["pl_not_avail"]="offline";
+    JsonObject dev = d["dev"].to<JsonObject>();
+    dev["ids"][0]=DEV_ID; dev["name"]=DEV_NAME; dev["mf"]="DIY";
+    dev["mdl"]="ESP32-S3 Feather + MAX3421E"; dev["sw"]=FW_VERSION;
+    char out[768]; size_t n = serializeJson(d, out, sizeof(out));
+    mqtt.publish(topic, (const uint8_t*)out, n, true);
+  }
   logf("HA UPS discovery published");
 }
 
@@ -391,6 +409,9 @@ static void onMqtt(char *topic, byte *payload, unsigned int len) {
   else if (cmd == "selftest")      logf("self-test quick: %s", upsTest(1) ? "submitted" : "submit FAILED");
   else if (cmd == "selftest_deep") logf("self-test deep: %s",  upsTest(2) ? "submitted" : "submit FAILED");
   else if (cmd == "selftest_abort")logf("self-test abort: %s", upsTest(3) ? "submitted" : "submit FAILED");
+  else if (cmd == "sens_low")    logf("sensitivity low: %s",    upsSetSens(0) ? "submitted" : "submit FAILED");
+  else if (cmd == "sens_medium") logf("sensitivity medium: %s", upsSetSens(1) ? "submitted" : "submit FAILED");
+  else if (cmd == "sens_high")   logf("sensitivity high: %s",   upsSetSens(2) ? "submitted" : "submit FAILED");
   else if (cmd == "raw33") { rawDump = true; logf("will dump raw report 33"); }
 }
 
@@ -540,6 +561,7 @@ static const PollItem POLL[] = {
   {49, 2},   // input Voltage
   { 9, 2},   // battery Voltage
   {24, 1},   // AudibleAlarmControl 1..3
+  {53, 1},   // APC:0x61 = APCSensitivity 0..2 (NUT apc-hid: low/medium/high)
 };
 static const uint8_t POLL_N = sizeof(POLL) / sizeof(POLL[0]);
 
@@ -557,6 +579,10 @@ static const char *testStr(int t) {
     case 5: return "in progress"; case 6: return "no test initiated";
     case 7: return "scheduled";   default: return "unknown";
   }
+}
+
+static const char *sensStr(int v) {
+  switch (v) { case 0: return "low"; case 1: return "medium"; case 2: return "high"; default: return "unknown"; }
 }
 
 // GET_REPORT may or may not echo the report id as byte 0 -- handle both.
@@ -599,6 +625,7 @@ static void applyReport(uint8_t id, const uint8_t *b, uint16_t len) {
     case 49: if (n >= 2) ups.vin     = (long)d[0] | ((long)d[1] << 8); break;
     case  9: if (n >= 2) ups.vbatt   = (long)d[0] | ((long)d[1] << 8); break;
     case 24: if (n >= 1) ups.alarm   = d[0]; break;
+    case 53: if (n >= 1) ups.sens    = d[0]; break;
     default: break;
   }
 }
@@ -622,6 +649,7 @@ static void fillUps(JsonVariant d) {
   if (ups.vbatt    >= 0) { d["battery_v_raw"] = ups.vbatt;
                            d["battery_v"] = serialized(String(ups.vbatt / 100.0, 2)); }
   if (ups.alarm    >= 0) d["alarm_ctl"]   = ups.alarm;
+  if (ups.sens     >= 0) { d["sens_code"] = ups.sens; d["sensitivity"] = sensStr(ups.sens); }
 }
 
 static void publishUps() {
@@ -834,6 +862,17 @@ static bool upsTest(uint8_t mode) {
   bool ok = tuh_hid_set_report(hidDaddr, hidIdx, 33, HID_REPORT_TYPE_FEATURE, setBuf, 2);
   Serial.printf("[test] mode=%u submit=%s\n", mode, ok ? "ok" : "FAILED");
   return ok;
+}
+
+// Write APCSensitivity (report 53, usage 0xFF86:0x61): 0 low, 1 medium, 2 high.
+// "Low" widens the input window the UPS accepts before going to battery, which
+// matters on a Powerwall island (2026-10-09: aquarium unit refused island power
+// for 5 min at 120 V). Same id-prefix rule as upsTest().
+static bool upsSetSens(uint8_t v) {
+  if (!hidMounted || v > 2) return false;
+  setBuf[0] = 53;
+  setBuf[1] = v;
+  return tuh_hid_set_report(hidDaddr, hidIdx, 53, HID_REPORT_TYPE_FEATURE, setBuf, 2);
 }
 
 extern "C" void tuh_hid_set_report_complete_cb(uint8_t daddr, uint8_t idx,
