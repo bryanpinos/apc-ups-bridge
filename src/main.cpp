@@ -23,7 +23,7 @@
 #include <esp_system.h>
 
 // ----------------------------------------------------------------- config
-static const char *FW_VERSION = "1.10.0";
+static const char *FW_VERSION = "1.11.0";
 // ===================== PER-UNIT IDENTITY =====================
 // Define these in secrets.h (gitignored) to build a second bridge. Defaults below
 // are placeholders so the project builds out of the box.
@@ -365,6 +365,8 @@ static void haUps() {
 
 static void publishDiscovery() {
   haSensor("rssi", "WiFi RSSI", "dBm", "signal_strength", "{{ value_json.rssi }}", true);
+  haSensor("bssid", "WiFi BSSID", nullptr, nullptr, "{{ value_json.bssid }}", true);
+  haSensor("wifi_ch", "WiFi channel", nullptr, nullptr, "{{ value_json.wifi_ch }}", true);
   haSensor("uptime", "Uptime", "s", "duration", "{{ value_json.uptime_s }}", true);
   haSensor("heap", "Free heap", "B", "data_size", "{{ value_json.heap_free }}", true);
   haSensor("batt_v", "Backup battery voltage", "V", "voltage", "{{ value_json.batt_v }}", true);
@@ -384,6 +386,10 @@ static void fillDiag(JsonDocument &d) {
   d["fw"]          = FW_VERSION;
   d["uptime_s"]    = (millis() - bootMs) / 1000;
   d["rssi"]        = WiFi.RSSI();
+  // Which AP, not just how loud. Answering "is it on the near AP or the far
+  // one?" otherwise means querying the controller; the box knows already.
+  d["bssid"]       = WiFi.BSSIDstr();
+  d["wifi_ch"]     = WiFi.channel();
   d["ip"]          = WiFi.localIP().toString();
   d["hostname"]    = WiFi.getHostname();
   d["heap_free"]   = ESP.getFreeHeap();
@@ -855,6 +861,7 @@ async function tick(){
    return row(f[1],'<span class="tag '+cls+'">'+lbl+"</span>");}).join("");
  document.getElementById("dev").innerHTML=
    row("Uptime",dur(d.uptime_s))+row("WiFi RSSI",(d.rssi!=null?d.rssi+" dBm":"--"))+
+   row("WiFi AP",(d.bssid||"--")+(d.wifi_ch?" (ch "+d.wifi_ch+")":""))+
    row("MQTT",d.mqtt==="true"?'<span class="tag f-ok">UP</span>':'<span class="tag f-bad">DOWN</span>')+
    row("USB Host wing",d.wing_present==="true"?'<span class="tag f-ok">PRESENT</span>':'<span class="tag f-bad">NOT DETECTED</span>')+
    row("USB device",d.usb_id||"--")+
@@ -1126,6 +1133,16 @@ void setup() {
   // So it MUST be called before mode(), or you get the MAC-derived default.
   WiFi.setHostname(NET_HOST);
   WiFi.mode(WIFI_STA);
+  // The ESP32 default is WIFI_FAST_SCAN: it walks channels in order and joins
+  // the FIRST AP matching the SSID, ignoring signal strength. Channel 1 is
+  // scanned first, so an AP there wins however far away it is. That put the
+  // basement bridge on a shed AP at -87 dBm (channel 1) while a wired AP sat
+  // line-of-sight on channel 6, and the aquarium bridge on the same shed AP at
+  // -76 dBm. Scan every channel and pick the strongest instead. Costs a little
+  // extra time at connect; worth it for a box that has to stay reachable during
+  // the outage it exists to report on.
+  WiFi.setScanMethod(WIFI_ALL_CHANNEL_SCAN);
+  WiFi.setSortMethod(WIFI_CONNECT_AP_BY_SIGNAL);
   WiFi.setSleep(false);              // USB host servicing dislikes modem sleep
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
 
