@@ -23,7 +23,7 @@
 #include <esp_system.h>
 
 // ----------------------------------------------------------------- config
-static const char *FW_VERSION = "1.9.1";
+static const char *FW_VERSION = "1.10.0";
 // ===================== PER-UNIT IDENTITY =====================
 // Define these in secrets.h (gitignored) to build a second bridge. Defaults below
 // are placeholders so the project builds out of the box.
@@ -66,7 +66,7 @@ WiFiClient   net;
 PubSubClient mqtt(net);
 static WebServer http(80);
 
-static char tBase[48], tStatus[80], tDiag[80], tDesc[80], tLog[80], tCmd[80], tStage[80], tBoot[80], tUps[80];
+static char tBase[48], tStatus[80], tDiag[80], tDesc[80], tLog[80], tCmd[80], tStage[80], tBoot[80], tUps[80], tTest[80], tTestEv[80];
 
 static volatile bool usbAttached = false;
 static uint16_t usbVid = 0, usbPid = 0;
@@ -106,6 +106,16 @@ struct UpsState {
   int  alarm=-1;
   int  sens=-1;             // APCSensitivity (report 53): 0 low, 1 medium, 2 high
 } ups;
+
+// Self-test results are EPHEMERAL: the UPS clears report 33 back to 6 ("no test
+// initiated") within seconds of a test finishing, so a pass is invisible unless
+// you happen to poll in that window. Latch terminal results (1..4) and publish
+// them so HA can record a history instead of watching a value that resets.
+static int      lastTestCode = -1;     // -1 = nothing latched since boot
+static uint32_t lastTestMs   = 0;
+static uint32_t testSeq      = 0;      // increments per NEW result; HA keys on it
+static bool     testResultDirty = false;
+static int      prevTestCode = -1;     // previous polled value, for edge detection
 
 static uint32_t pollTimeouts = 0;
 static uint32_t submitFails  = 0;   // tuh_hid_get_report() refused (control EP busy)
@@ -325,6 +335,24 @@ static void haUps() {
     d["cmd_t"]=tCmd; d["cmd_tpl"]="sens_{{ value }}";
     d["options"][0]="low"; d["options"][1]="medium"; d["options"][2]="high";
     d["ent_cat"]="config"; d["icon"]="mdi:sine-wave";
+    d["avty_t"]=tStatus; d["pl_avail"]="online"; d["pl_not_avail"]="offline";
+    JsonObject dev = d["dev"].to<JsonObject>();
+    dev["ids"][0]=DEV_ID; dev["name"]=DEV_NAME; dev["mf"]="DIY";
+    dev["mdl"]="ESP32-S3 Feather + MAX3421E"; dev["sw"]=FW_VERSION;
+    char out[768]; size_t n = serializeJson(d, out, sizeof(out));
+    mqtt.publish(topic, (const uint8_t*)out, n, true);
+  }
+  {
+    // State is the outcome; seq/code/age ride along as attributes. HA keys its
+    // logbook automation on seq, so two consecutive passes are still two
+    // distinct events -- a plain result sensor would show no state change.
+    char topic[160];
+    snprintf(topic, sizeof(topic), "homeassistant/sensor/%s_last_test/config", DEV_ID);
+    JsonDocument d;
+    d["name"]="UPS last self-test"; d["uniq_id"]=String(DEV_ID)+"_last_test";
+    d["stat_t"]=tTest; d["val_tpl"]="{{ value_json.result | default('unknown') }}";
+    d["json_attr_t"]=tTest;
+    d["icon"]="mdi:clipboard-check-outline";
     d["avty_t"]=tStatus; d["pl_avail"]="online"; d["pl_not_avail"]="offline";
     JsonObject dev = d["dev"].to<JsonObject>();
     dev["ids"][0]=DEV_ID; dev["name"]=DEV_NAME; dev["mf"]="DIY";
@@ -627,7 +655,27 @@ static void applyReport(uint8_t id, const uint8_t *b, uint16_t len) {
     case 12: if (n >= 3) { ups.capacity = d[0];
                            ups.runtime  = (long)d[1] | ((long)d[2] << 8); } break;
     case 80: if (n >= 1) ups.load    = d[0]; break;
-    case 33: if (n >= 1) ups.test    = d[0]; break;
+    case 33:
+      if (n >= 1) {
+        ups.test = d[0];
+        // Edge-triggered, not value-compare: two consecutive passes must both
+        // register, so latch on the TRANSITION into 1..4 rather than on the
+        // value differing from the last latched one.
+        if (prevTestCode < 0) {
+          // First observation since boot: seed the edge detector without
+          // latching. Otherwise a reboot while the UPS still shows a lingering
+          // result republishes it as a brand-new one.
+          prevTestCode = (int)d[0];
+        } else if ((int)d[0] != prevTestCode) {
+          if (d[0] >= 1 && d[0] <= 4) {
+            lastTestCode = d[0]; lastTestMs = millis(); testSeq++;
+            testResultDirty = true;
+            logf("self-test result: %s (seq %lu)", testStr(d[0]), (unsigned long)testSeq);
+          }
+          prevTestCode = (int)d[0];
+        }
+      }
+      break;
     case 49: if (n >= 2) ups.vin     = (long)d[0] | ((long)d[1] << 8); break;
     case  9: if (n >= 2) ups.vbatt   = (long)d[0] | ((long)d[1] << 8); break;
     case 24: if (n >= 1) ups.alarm   = d[0]; break;
@@ -656,6 +704,28 @@ static void fillUps(JsonVariant d) {
                            d["battery_v"] = serialized(String(ups.vbatt / 100.0, 2)); }
   if (ups.alarm    >= 0) d["alarm_ctl"]   = ups.alarm;
   if (ups.sens     >= 0) { d["sens_code"] = ups.sens; d["sensitivity"] = sensStr(ups.sens); }
+  if (lastTestCode >= 0) {
+    d["last_test_code"]  = lastTestCode;
+    d["last_test"]       = testStr(lastTestCode);
+    d["last_test_age_s"] = (millis() - lastTestMs) / 1000;
+    d["test_seq"]        = testSeq;
+  }
+}
+
+// Retained so HA sees the last result after a restart. seq makes each result a
+// distinct state change even when the outcome repeats.
+static void publishTestResult() {
+  if (lastTestCode < 0) return;
+  char out[160];
+  snprintf(out, sizeof(out),
+           "{\"seq\":%lu,\"code\":%d,\"result\":\"%s\",\"age_s\":%lu}",
+           (unsigned long)testSeq, lastTestCode, testStr(lastTestCode),
+           (unsigned long)((millis() - lastTestMs) / 1000));
+  mqtt.publish(tTest, out, true);        // retained: survives an HA restart
+  // Same payload, NOT retained. Automations trigger on this one, so an HA
+  // restart re-subscribing to the retained topic cannot replay old results as
+  // fresh logbook entries.
+  mqtt.publish(tTestEv, out, false);
 }
 
 static void publishUps() {
@@ -1045,6 +1115,8 @@ void setup() {
   snprintf(tStage,  sizeof(tStage),  "%s/stage",  tBase);
   snprintf(tBoot,   sizeof(tBoot),   "%s/boot",   tBase);
   snprintf(tUps,    sizeof(tUps),    "%s/ups",    tBase);
+  snprintf(tTest,   sizeof(tTest),   "%s/test_result", tBase);
+  snprintf(tTestEv, sizeof(tTestEv), "%s/test_event",  tBase);
 
   Wire.begin();
   fuelGaugeOk = fuelGauge.begin(&Wire);
@@ -1165,6 +1237,7 @@ void loop() {
   hidDescFetchTick();
   TIME_IT(tmPoll, pollTick())
   if (hidDescDirty && mqtt.connected()) publishDescriptor();
+  if (testResultDirty && mqtt.connected()) { publishTestResult(); testResultDirty = false; }
 
   if (millis() - lastDiag >= DIAG_INTERVAL_MS) {
     lastDiag = millis();
