@@ -23,7 +23,7 @@
 #include <esp_system.h>
 
 // ----------------------------------------------------------------- config
-static const char *FW_VERSION = "1.8.0";
+static const char *FW_VERSION = "1.9.1";
 // ===================== PER-UNIT IDENTITY =====================
 // Define these in secrets.h (gitignored) to build a second bridge. Defaults below
 // are placeholders so the project builds out of the box.
@@ -86,6 +86,10 @@ static bool     hidDescDirty = false;
 // usb_attached and hid_mounted both describe the DOWNSTREAM device and read
 // false either way.
 static bool     wingPresent = false;
+// MAX3421E pre-flight results; see probeMax3421() below. osc_ms = -1 means the
+// crystal never started, which is the signature of a bad joint on U1.
+static uint8_t  m3421Rev   = 0;
+static int32_t  m3421OscMs = -1;
 
 struct UpsState {
   bool valid = false;
@@ -360,6 +364,8 @@ static void fillDiag(JsonDocument &d) {
   d["hid_mounted"]  = hidMounted ? "true" : "false";
   d["hid_desc_len"] = hidDescLen;
   d["wing_present"]  = wingPresent ? "true" : "false";
+  d["m3421_rev"]     = m3421Rev;
+  d["osc_ms"]        = m3421OscMs;
   d["poll_timeouts"] = pollTimeouts;
   d["submit_fails"]  = submitFails;
   d["ep0_aborts"]    = ep0Aborts;
@@ -952,6 +958,80 @@ static bool usbHostReinit() {
 }
 
 // ----------------------------------------------------------------- setup / loop
+// ----------------------------------------------------- MAX3421E pre-flight
+// TinyUSB's hcd_init() waits for the MAX3421E's crystal with an UNBOUNDED spin:
+//   while( !(reg_read(USBIRQ) & OSCOK) ) { }
+// If the oscillator never starts, setup() never returns. WiFi is already up by
+// then, so the board still answers pings while having no HTTP, no MQTT and --
+// critically -- no OTA. Only a physical power cycle recovers it.
+//
+// Observed in the field 2026-10-09 on the basement unit: pressing directly on
+// the MAX3421E package released the spin instantly and the web server appeared.
+// That is a marginal solder joint on the chip itself, and since SPI reads work
+// fine (the REVISION read always succeeds) it is on a crystal or supply pin --
+// exactly the subset that lets the chip talk but never oscillate.
+//
+// So probe the chip ourselves FIRST, with timeouts, and report what we find
+// instead of disappearing. Same registers and framing the driver uses.
+#define M3421_USBIRQ    (13u << 3)
+#define M3421_USBCTL    (15u << 3)
+#define M3421_PINCTL    (17u << 3)
+#define M3421_FDUPSPI   (1u << 4)
+#define M3421_REVISION  (18u << 3)
+#define M3421_WRITE     0x02
+#define M3421_CHIPRES   (1u << 5)
+#define M3421_OSCOK     (1u << 0)
+
+static uint8_t m3421Read(uint8_t reg) {
+  digitalWrite(MAX3421_CS, LOW);
+  SPI.transfer(reg);
+  uint8_t v = SPI.transfer(0x00);
+  digitalWrite(MAX3421_CS, HIGH);
+  return v;
+}
+
+static void m3421Write(uint8_t reg, uint8_t val) {
+  digitalWrite(MAX3421_CS, LOW);
+  SPI.transfer(reg | M3421_WRITE);
+  SPI.transfer(val);
+  digitalWrite(MAX3421_CS, HIGH);
+}
+
+// Returns true if the chip answered AND its oscillator started within timeoutMs.
+static bool probeMax3421(uint32_t timeoutMs) {
+  pinMode(MAX3421_CS, OUTPUT);
+  digitalWrite(MAX3421_CS, HIGH);
+  SPI.begin();                       // board defaults; USBHost.begin() re-inits harmlessly
+  SPI.beginTransaction(SPISettings(4000000, MSBFIRST, SPI_MODE0));
+
+  // MUST come first. The MAX3421E powers up in HALF-duplex SPI, where MISO is
+  // not driven at all -- it talks back over MOSI. Reading any register before
+  // setting FDUPSPI returns 0x00 on a perfectly healthy chip. hcd_init() does
+  // this on its first line for exactly this reason; omitting it here made the
+  // probe report a dead chip on every COLD boot, while reading correctly after
+  // an OTA or cmd reboot (which leave PINCTL set from the previous init). That
+  // false negative cost a lot of pointless rework -- do not remove it.
+  m3421Write(M3421_PINCTL, M3421_FDUPSPI);
+  m3421Rev = m3421Read(M3421_REVISION);
+  const bool revOk = (m3421Rev == 0x01 || m3421Rev == 0x12 || m3421Rev == 0x13);
+  Serial.printf("[max3421] revision=0x%02X %s\n", m3421Rev, revOk ? "ok" : "BAD (no chip / SPI dead)");
+
+  if (revOk) {
+    m3421Write(M3421_USBCTL, M3421_CHIPRES);
+    m3421Write(M3421_USBCTL, 0);
+    const uint32_t t0 = millis();
+    while (millis() - t0 < timeoutMs) {
+      if (m3421Read(M3421_USBIRQ) & M3421_OSCOK) { m3421OscMs = (int32_t)(millis() - t0); break; }
+      delay(1);
+    }
+    if (m3421OscMs >= 0) Serial.printf("[max3421] oscillator OK in %ld ms\n", (long)m3421OscMs);
+    else Serial.printf("[max3421] oscillator DID NOT START in %lu ms -- suspect a solder joint "
+                       "on the crystal or supply pins of U1\n", (unsigned long)timeoutMs);
+  }
+  SPI.endTransaction();
+  return revOk && m3421OscMs >= 0;
+}
+
 void setup() {
   Serial.begin(115200);
   bootMs = millis();
@@ -1023,10 +1103,25 @@ void setup() {
   // half-seated wing is the way to achieve that -- hcd_init() spins forever in
   // its oscillator-stable wait. That hang is observable: the stage topic stops
   // at usbhost_begin_enter and never reaches usbhost_ok.
-  stage("usbhost_begin_enter");
-  wingPresent = USBHost.begin(1);
-  stage(wingPresent ? "usbhost_ok" : "usbhost_NO_WING");
-  if (!wingPresent) logf("MAX3421E did not respond -- USB Host wing missing or unseated");
+  // Probe before begin(): hcd_init() would spin forever on a dead oscillator.
+  stage("usbhost_probe");
+  const bool oscOk = probeMax3421(1000);
+  logf("MAX3421E rev=0x%02X osc_ms=%ld", m3421Rev, (long)m3421OscMs);
+  if (!oscOk) {
+    // Do NOT call USBHost.begin() -- it would hang and take HTTP/MQTT/OTA with
+    // it. Run degraded instead: everything else stays up and says what is wrong,
+    // and the unit remains OTA-able.
+    wingPresent = false;
+    stage(m3421Rev ? "usbhost_NO_OSC" : "usbhost_NO_WING");
+    logf("SKIPPING USB host init -- %s. Bridge stays online so this is visible.",
+         m3421Rev ? "oscillator never started (press/reflow U1 on the wing)"
+                  : "MAX3421E did not answer (wing missing or unseated)");
+  } else {
+    stage("usbhost_begin_enter");
+    wingPresent = USBHost.begin(1);
+    stage(wingPresent ? "usbhost_ok" : "usbhost_NO_WING");
+    if (!wingPresent) logf("MAX3421E did not respond -- USB Host wing missing or unseated");
+  }
 
   if (mq) { publishDiscovery(); publishDiag(); }
   stage("setup_done");
