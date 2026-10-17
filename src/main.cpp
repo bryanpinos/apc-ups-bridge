@@ -465,13 +465,30 @@ static void fillDiag(JsonDocument &d) {
 
 }
 
+// serializeJson() silently truncates to fit the buffer and returns the SHORT
+// length, so an oversized payload goes out as invalid JSON and every consumer
+// simply stops updating -- no error anywhere. That is exactly what happened when
+// boot_scan was added in 1.11.2: the 640-byte diag buffer overflowed, HA's MQTT
+// sensors stopped parsing, and it went unnoticed because the change was verified
+// over HTTP /api, which serializes separately. Never publish silently-truncated
+// JSON again: complain loudly and skip the publish.
+static bool publishJson(const char *topic, JsonDocument &d, char *out, size_t cap, bool retain) {
+  size_t n = serializeJson(d, out, cap);
+  if (n >= cap - 1) {                       // hit the ceiling => truncated
+    logf("TRUNCATED payload for %s: needed >%u bytes, buffer %u -- NOT published",
+         topic, (unsigned)n, (unsigned)cap);
+    return false;
+  }
+  return mqtt.publish(topic, (const uint8_t *)out, n, retain);
+}
+
 static void publishDiag() {
   JsonDocument d;
   fillDiag(d);
   tmLoop = tmUsb = tmOta = tmMqtt = tmPoll = tmHttp = 0;   // worst-case window closes here
-  char out[640];
-  size_t n = serializeJson(d, out, sizeof(out));
-  mqtt.publish(tDiag, (const uint8_t *)out, n, false);
+  // boot_scan alone can be ~400 bytes; measured whole-payload size is ~1.1 kB.
+  char out[1536];
+  publishJson(tDiag, d, out, sizeof(out), false);
 }
 
 // ----------------------------------------------------------------- MQTT
