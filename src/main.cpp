@@ -23,7 +23,7 @@
 #include <esp_system.h>
 
 // ----------------------------------------------------------------- config
-static const char *FW_VERSION = "1.11.0";
+static const char *FW_VERSION = "1.11.2";
 // ===================== PER-UNIT IDENTITY =====================
 // Define these in secrets.h (gitignored) to build a second bridge. Defaults below
 // are placeholders so the project builds out of the box.
@@ -200,22 +200,48 @@ static const char *authStr(int a) {
 // Does NOT print the SSID itself -- only whether the configured one is visible.
 // The ESP32-S3 radio is 2.4 GHz only, so "NOT FOUND" usually means the SSID is
 // 5 GHz-only, hidden, or misspelled.
+// The boot scan, kept so it can be read over HTTP/MQTT. Native USB CDC detaches
+// on reset, so the boot lines are effectively uncapturable over the cable --
+// and a bad association is exactly the problem you cannot drive to with a
+// laptop. This is the only way to see what the radio actually heard.
+static String bootScan;
+
 static void wifiScanReport() {
   int n = WiFi.scanNetworks(false, true);
   Serial.printf("[wifi] scan: %d networks visible on 2.4GHz\n", n);
-  bool found = false;
-  for (int i = 0; i < n; i++) {
-    if (WiFi.SSID(i) == String(WIFI_SSID)) {
-      found = true;
-      Serial.printf("[wifi] configured SSID FOUND  ch=%d rssi=%d auth=%s\n",
-                    WiFi.channel(i), (int)WiFi.RSSI(i),
-                    authStr(WiFi.encryptionType(i)));
-      break;
-    }
-  }
-  if (!found)
+
+  // List EVERY AP carrying the configured SSID, strongest first. It used to
+  // break at the first match, which is worse than useless here: with one SSID
+  // across several APs, the whole question is which candidates existed and how
+  // they compared. Without the full list you cannot tell "it chose badly" from
+  // "nothing better was audible".
+  int idx[32]; int m = 0;
+  for (int i = 0; i < n && m < 32; i++)
+    if (WiFi.SSID(i) == String(WIFI_SSID)) idx[m++] = i;
+
+  if (!m) {
     Serial.println("[wifi] configured SSID NOT FOUND on 2.4GHz "
                    "(5GHz-only? hidden? typo?)");
+    WiFi.scanDelete();
+    return;
+  }
+
+  for (int a = 0; a < m - 1; a++)             // insertion sort, strongest first
+    for (int b = a + 1; b < m; b++)
+      if (WiFi.RSSI(idx[b]) > WiFi.RSSI(idx[a])) { int t = idx[a]; idx[a] = idx[b]; idx[b] = t; }
+
+  Serial.printf("[wifi] %d AP(s) carry the configured SSID:\n", m);
+  bootScan = "";
+  for (int a = 0; a < m; a++) {
+    int i = idx[a];
+    Serial.printf("[wifi]   %-17s ch=%-3d rssi=%-5d auth=%s%s\n",
+                  WiFi.BSSIDstr(i).c_str(), WiFi.channel(i), (int)WiFi.RSSI(i),
+                  authStr(WiFi.encryptionType(i)), a == 0 ? "   <- strongest" : "");
+    if (bootScan.length() < 400) {
+      if (a) bootScan += ", ";
+      bootScan += WiFi.BSSIDstr(i) + "/ch" + WiFi.channel(i) + "/" + (int)WiFi.RSSI(i);
+    }
+  }
   WiFi.scanDelete();
 }
 
@@ -389,6 +415,7 @@ static void fillDiag(JsonDocument &d) {
   // Which AP, not just how loud. Answering "is it on the near AP or the far
   // one?" otherwise means querying the controller; the box knows already.
   d["bssid"]       = WiFi.BSSIDstr();
+  d["boot_scan"]   = bootScan;
   d["wifi_ch"]     = WiFi.channel();
   d["ip"]          = WiFi.localIP().toString();
   d["hostname"]    = WiFi.getHostname();
@@ -1144,6 +1171,11 @@ void setup() {
   WiFi.setScanMethod(WIFI_ALL_CHANNEL_SCAN);
   WiFi.setSortMethod(WIFI_CONNECT_AP_BY_SIGNAL);
   WiFi.setSleep(false);              // USB host servicing dislikes modem sleep
+
+  // Always on record, not just when offline: this is what makes a bad
+  // association diagnosable after the fact instead of by re-flashing.
+  wifiScanReport();
+
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
 
   uint32_t t0 = millis();
