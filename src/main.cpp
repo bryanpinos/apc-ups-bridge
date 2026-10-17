@@ -24,6 +24,15 @@
 
 // ----------------------------------------------------------------- config
 static const char *FW_VERSION = "1.11.2";
+
+// Stamped in at compile time by tools/build_id.py (git sha + UTC build time).
+// FW_VERSION is hand-maintained and says nothing about WHICH build is running:
+// it would read 1.11.2 for code that never got committed. The basement unit sat
+// un-OTA-able at 1 Mbps and the EMS panel silently missed firmware for weeks --
+// both invisible without a per-build stamp.
+#ifndef BUILD_ID
+#define BUILD_ID "unknown"
+#endif
 // ===================== PER-UNIT IDENTITY =====================
 // Define these in secrets.h (gitignored) to build a second bridge. Defaults below
 // are placeholders so the project builds out of the box.
@@ -410,6 +419,7 @@ static void publishDiscovery() {
 // the 15 s MQTT diag exists to report.
 static void fillDiag(JsonDocument &d) {
   d["fw"]          = FW_VERSION;
+  d["build"]       = BUILD_ID;
   d["uptime_s"]    = (millis() - bootMs) / 1000;
   d["rssi"]        = WiFi.RSSI();
   // Which AP, not just how loud. Answering "is it on the near AP or the far
